@@ -1,0 +1,17 @@
+{
+  "name": "otp-bridge-monorepo",
+  "version": "1.0.0",
+  "description": "Private Android Notification Forwarding App & Lightweight Fastify Relay Server",
+  "private": true,
+  "workspaces": [
+    "mobile",
+    "server"
+  ],
+  "scripts": {
+    "dev:server": "npm --prefix server run dev",
+    "dev:mobile": "npm --prefix mobile run start",
+    "test:server": "npm --prefix server run test",
+    "test:mobile": "npm --prefix mobile run test",
+    "test": "npm run test:server && npm run test:mobile"
+  }
+}

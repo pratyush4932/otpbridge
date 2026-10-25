@@ -1,0 +1,9 @@
+{
+  "name": "notification-listener",
+  "platforms": ["android"],
+  "android": {
+    "modules": [
+      "expo.modules.notificationlistener.NotificationListenerModule"
+    ]
+  }
+}
