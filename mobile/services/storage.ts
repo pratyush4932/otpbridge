@@ -21,7 +21,8 @@ const STORAGE_KEYS = {
   TARGET_APPS: 'otp_bridge_target_apps',
   ENABLED_OTHER_SMS: 'otp_bridge_enabled_other_sms',
   GMAIL_ENABLED: 'otp_bridge_gmail_enabled',
-  DEFAULT_SMS_ENABLED: 'otp_bridge_default_sms_enabled'
+  DEFAULT_SMS_ENABLED: 'otp_bridge_default_sms_enabled',
+  RECEIVED_MESSAGES: 'otp_bridge_received_messages'
 } as const;
 
 export const ARCHIVED_PACKAGES = new Set([
@@ -161,6 +162,7 @@ export const StorageService = {
     await removeItem(STORAGE_KEYS.DEVICE_ID);
     await removeItem(STORAGE_KEYS.DEVICE_TOKEN);
     await removeItem(STORAGE_KEYS.PAIRED_WITH_ID);
+    await removeItem(STORAGE_KEYS.RECEIVED_MESSAGES);
   },
 
   async getAllowlistedPackages(): Promise<string[]> {
@@ -275,5 +277,36 @@ export const StorageService = {
     await setItem(STORAGE_KEYS.TARGET_APPS, JSON.stringify(apps));
     // Also update ALLOWLIST_PACKAGES for compatibility
     await setItem(STORAGE_KEYS.ALLOWLIST_PACKAGES, JSON.stringify(apps.map((a) => a.packageName)));
+  },
+
+  async getReceivedMessages<T = any>(): Promise<T[]> {
+    const raw = await getItem(STORAGE_KEYS.RECEIVED_MESSAGES);
+    if (!raw) return [];
+    try {
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return [];
+      const cutoff = Date.now() - 5 * 60 * 1000;
+      return parsed.filter((m: any) => m && typeof m.receivedAt === 'number' && m.receivedAt > cutoff);
+    } catch {
+      return [];
+    }
+  },
+
+  async saveReceivedMessages<T = any>(messages: T[]): Promise<void> {
+    const cutoff = Date.now() - 5 * 60 * 1000;
+    const valid = messages.filter((m: any) => m && typeof (m as any).receivedAt === 'number' && (m as any).receivedAt > cutoff);
+    await setItem(STORAGE_KEYS.RECEIVED_MESSAGES, JSON.stringify(valid));
+  },
+
+  async clearReceivedMessages(): Promise<void> {
+    await removeItem(STORAGE_KEYS.RECEIVED_MESSAGES);
+  },
+
+  async getRawItem(key: string): Promise<string | null> {
+    return await getItem(key);
+  },
+
+  async setRawItem(key: string, value: string): Promise<void> {
+    await setItem(key, value);
   }
 };

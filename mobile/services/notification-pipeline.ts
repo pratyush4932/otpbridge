@@ -13,6 +13,7 @@ export interface PipelineActivityItem {
   serviceName?: string;
   carrierTag?: string;
   maskedCode: string;
+  bodySnippet?: string;
   timestamp: number;
   status: 'forwarded' | 'queued' | 'ignored_unlisted' | 'ignored_no_otp' | 'duplicate' | 'error';
   reason?: string;
@@ -23,6 +24,7 @@ export class NotificationPipeline {
   private isRunning = false;
   private activityListeners = new Set<(item: PipelineActivityItem) => void>();
   private recentActivity: PipelineActivityItem[] = [];
+  private lastReportedUnlisted = new Map<string, number>();
 
   public start(): void {
     if (this.isRunning) return;
@@ -91,17 +93,31 @@ export class NotificationPipeline {
       console.log(`⚠️  Reason:  ${matchResult.reason || 'Package not in explicit allowlist'}`);
       console.log('=================================================================\n');
 
-      // Forward to server diagnostic endpoint so it also prints in the server terminal
-      StorageService.getCredentials().then((creds) => {
-        if (creds.serverUrl) {
-          ApiClient.reportUnlistedNotification(creds.serverUrl, {
-            packageName,
-            title,
-            body: text,
-            reason: matchResult.reason || 'Package not in explicit allowlist'
-          }).catch(() => {});
+      // Debounce unlisted reports to avoid flooding the relay server with duplicate notifications
+      const reportKey = `${packageName}:${(text || '').slice(0, 60)}`;
+      const nowTime = Date.now();
+      const lastTime = this.lastReportedUnlisted.get(reportKey) || 0;
+
+      if (nowTime - lastTime > 10000) {
+        this.lastReportedUnlisted.set(reportKey, nowTime);
+        if (this.lastReportedUnlisted.size > 80) {
+          for (const [k, v] of this.lastReportedUnlisted.entries()) {
+            if (nowTime - v > 60000) this.lastReportedUnlisted.delete(k);
+          }
         }
-      });
+
+        // Forward to server diagnostic endpoint
+        StorageService.getCredentials().then((creds) => {
+          if (creds.serverUrl) {
+            ApiClient.reportUnlistedNotification(creds.serverUrl, {
+              packageName,
+              title,
+              body: text,
+              reason: matchResult.reason || 'Package not in explicit allowlist'
+            }).catch(() => {});
+          }
+        });
+      }
 
       return this.recordActivity({
         id,

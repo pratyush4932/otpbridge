@@ -4,6 +4,7 @@ import { buildApp } from '../src/index.js';
 import { deviceStore } from '../src/services/device-store.js';
 import { ephemeralMessageQueue } from '../src/services/message-queue.js';
 import { wsManager } from '../src/websocket/ws-server.js';
+import { config } from '../src/config.js';
 import { FastifyInstance } from 'fastify';
 
 describe('OTP Bridge Server Integration Tests', () => {
@@ -272,13 +273,20 @@ describe('OTP Bridge Server Integration Tests', () => {
     assert.strictEqual(ephemeralMessageQueue.peekForReceiver(receiverDevice.id).length, 0);
   });
 
-  test('Rate Limiting: Rejects requests exceeding rate limit threshold', async () => {
-    // Make rapid requests to verify rate-limit headers or response
+  test('Health check is exempt from rate limits and always succeeds', async () => {
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/health'
+    });
+    assert.strictEqual(res.statusCode, 200);
+  });
+
+  test('Rate Limiting: Rejects requests exceeding rate limit threshold on API routes', async () => {
     let lastRes;
-    for (let i = 0; i < 70; i++) {
+    for (let i = 0; i <= config.RATE_LIMIT_MAX + 5; i++) {
       lastRes = await app.inject({
         method: 'GET',
-        url: '/api/health'
+        url: '/api/devices'
       });
       if (lastRes.statusCode === 429) break;
     }

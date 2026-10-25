@@ -25,6 +25,12 @@ export class ReceiverSocketClient {
   private reconnectAttempts = 0;
   private reconnectTimer: any = null;
   private pingInterval: any = null;
+  private pruneInterval: any = null;
+
+  private messages: ReceivedOtpMessage[] = [];
+  private isLoaded = false;
+  private loadPromise: Promise<ReceivedOtpMessage[]> | null = null;
+  private messagesListeners = new Set<(msgs: ReceivedOtpMessage[]) => void>();
 
   private messageListeners = new Set<(msg: ReceivedOtpMessage) => void>();
   private statusListeners = new Set<(status: ConnectionState) => void>();
@@ -32,11 +38,122 @@ export class ReceiverSocketClient {
 
   public status: ConnectionState = 'disconnected';
 
+  constructor() {
+    this.loadStoredMessages();
+    this.startPruneInterval();
+  }
+
+  private startPruneInterval(): void {
+    if (this.pruneInterval) return;
+    this.pruneInterval = setInterval(() => {
+      this.pruneExpiredMessages();
+    }, 5000);
+    if (this.pruneInterval?.unref) {
+      this.pruneInterval.unref();
+    }
+  }
+
+  public stopPruneInterval(): void {
+    if (this.pruneInterval) {
+      clearInterval(this.pruneInterval);
+      this.pruneInterval = null;
+    }
+  }
+
+  public async loadStoredMessages(): Promise<ReceivedOtpMessage[]> {
+    try {
+      const stored = await StorageService.getReceivedMessages<ReceivedOtpMessage>();
+      const existingIds = new Set(this.messages.map((m) => m.id));
+      for (const msg of stored) {
+        if (!existingIds.has(msg.id)) {
+          this.messages.push(msg);
+        }
+      }
+      this.messages.sort((a, b) => b.receivedAt - a.receivedAt);
+    } catch {
+      // Fallback
+    } finally {
+      this.isLoaded = true;
+      this.pruneExpiredMessages();
+      this.notifyMessagesListeners();
+    }
+    return this.getMessages();
+  }
+
+  public pruneExpiredMessages(): boolean {
+    const cutoff = Date.now() - 5 * 60 * 1000;
+    const initialLen = this.messages.length;
+    this.messages = this.messages.filter((m) => m.receivedAt > cutoff);
+    if (this.messages.length !== initialLen) {
+      StorageService.saveReceivedMessages(this.messages).catch(() => {});
+      this.notifyMessagesListeners();
+      return true;
+    }
+    return false;
+  }
+
+  public getMessages(): ReceivedOtpMessage[] {
+    const cutoff = Date.now() - 5 * 60 * 1000;
+    return this.messages.filter((m) => m.receivedAt > cutoff);
+  }
+
+  public async clearMessages(): Promise<void> {
+    this.messages = [];
+    await StorageService.clearReceivedMessages();
+    this.notifyMessagesListeners();
+  }
+
+  public onMessagesChange(listener: (msgs: ReceivedOtpMessage[]) => void): () => void {
+    this.messagesListeners.add(listener);
+    listener(this.getMessages());
+    return () => {
+      this.messagesListeners.delete(listener);
+    };
+  }
+
+  private notifyMessagesListeners(): void {
+    const msgs = this.getMessages();
+    for (const listener of this.messagesListeners) {
+      try {
+        listener(msgs);
+      } catch {}
+    }
+  }
+
+  public isConnected(): boolean {
+    return this.status === 'connected';
+  }
+
+  public getStatus(): ConnectionState {
+    return this.status;
+  }
+
   public connect(serverUrl: string, deviceId: string, token: string): void {
+    const isSameTarget =
+      this.serverUrl === serverUrl &&
+      this.deviceId === deviceId &&
+      this.token === token;
+
     this.serverUrl = serverUrl;
     this.deviceId = deviceId;
     this.token = token;
     this.shouldReconnect = true;
+
+    if (
+      isSameTarget &&
+      ((this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) ||
+        this.reconnectTimer !== null)
+    ) {
+      return;
+    }
+
+    if (this.ws) {
+      try {
+        this.ws.close();
+      } catch {}
+      this.ws = null;
+    }
+
     this.initiateConnection();
   }
 
@@ -114,9 +231,17 @@ export class ReceiverSocketClient {
               this.ws.send(JSON.stringify({ type: 'ack', id: raw.id }));
             }
 
+            // Retain in memory and persist across navigation
+            if (!this.messages.some((m) => m.id === message.id)) {
+              this.messages = [message, ...this.messages];
+              this.pruneExpiredMessages();
+              StorageService.saveReceivedMessages(this.messages).catch(() => {});
+            }
+
             for (const listener of this.messageListeners) {
               listener(message);
             }
+            this.notifyMessagesListeners();
             return;
           }
 
@@ -157,6 +282,9 @@ export class ReceiverSocketClient {
         this.ws.send(JSON.stringify({ type: 'ping' }));
       }
     }, 25000);
+    if (this.pingInterval?.unref) {
+      this.pingInterval.unref();
+    }
   }
 
   private stopPing(): void {
@@ -179,6 +307,9 @@ export class ReceiverSocketClient {
         this.initiateConnection();
       }
     }, delay);
+    if (this.reconnectTimer?.unref) {
+      this.reconnectTimer.unref();
+    }
   }
 
   public disconnect(): void {
@@ -188,6 +319,7 @@ export class ReceiverSocketClient {
       this.reconnectTimer = null;
     }
     this.stopPing();
+    this.stopPruneInterval();
     if (this.ws) {
       this.ws.close();
       this.ws = null;

@@ -1,8 +1,18 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import { View, Text, StyleSheet, ScrollView, RefreshControl } from 'react-native';
-import { useRouter } from 'expo-router';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import {
+  View,
+  Text,
+  StyleSheet,
+  ScrollView,
+  RefreshControl,
+  TouchableOpacity
+} from 'react-native';
+import { useRouter, useFocusEffect } from 'expo-router';
+import { Ionicons } from '@expo/vector-icons';
 import { StorageService, AppCredentials } from '../services/storage';
 import { ApiClient } from '../services/api';
+import { sessionHistoryService, SessionEvent } from '../services/session-history';
+import { receiverSocketClient } from '../services/receiver-socket';
 import { Card } from '../components/Card';
 import { StatusBadge } from '../components/StatusBadge';
 import { PrimaryButton } from '../components/PrimaryButton';
@@ -13,38 +23,83 @@ export default function HomeScreen() {
   const [serverOnline, setServerOnline] = useState<boolean | null>(null);
   const [allowlistCount, setAllowlistCount] = useState<number>(0);
   const [refreshing, setRefreshing] = useState(false);
+  const [sessionEvents, setSessionEvents] = useState<SessionEvent[]>(() =>
+    sessionHistoryService.getEvents()
+  );
+  const isLoadingRef = useRef(false);
 
   const loadState = useCallback(async () => {
-    let creds = await StorageService.getCredentials();
-    const apps = await StorageService.getAllowlistedPackages();
-    setAllowlistCount(apps.length);
+    if (isLoadingRef.current) return;
+    isLoadingRef.current = true;
+    try {
+      await sessionHistoryService.ensureActiveSessionRecorded();
+      let creds = await StorageService.getCredentials();
+      const apps = await StorageService.getAllowlistedPackages();
+      setAllowlistCount(apps.length);
 
-    const isHealthy = await ApiClient.checkHealth(creds.serverUrl);
-    setServerOnline(isHealthy);
+      const isHealthy = await ApiClient.checkHealth(creds.serverUrl);
+      setServerOnline(isHealthy);
 
-    // If device has registered credentials, sync live pairing state from server
-    if (isHealthy && creds.deviceId && creds.deviceToken) {
-      try {
-        const status = await ApiClient.getDeviceStatus(creds.serverUrl, creds.deviceId, creds.deviceToken);
-        if (status.device.isPaired && status.partner?.id) {
-          if (creds.pairedWithId !== status.partner.id) {
-            await StorageService.saveCredentials({ pairedWithId: status.partner.id });
-            creds = { ...creds, pairedWithId: status.partner.id };
+      if (isHealthy && creds.deviceId && creds.deviceToken) {
+        try {
+          const status = await ApiClient.getDeviceStatus(
+            creds.serverUrl,
+            creds.deviceId,
+            creds.deviceToken
+          );
+          if (status.device.isPaired && status.partner?.id) {
+            if (creds.pairedWithId !== status.partner.id) {
+              await StorageService.saveCredentials({ pairedWithId: status.partner.id });
+              creds = { ...creds, pairedWithId: status.partner.id };
+            }
+          } else if (!status.device.isPaired && creds.pairedWithId) {
+            await StorageService.saveCredentials({ pairedWithId: null });
+            creds = { ...creds, pairedWithId: null };
           }
-        } else if (!status.device.isPaired && creds.pairedWithId) {
-          await StorageService.saveCredentials({ pairedWithId: null });
-          creds = { ...creds, pairedWithId: null };
+        } catch {
+          // Fall back to local credentials
         }
-      } catch {
-        // Fall back to locally stored credentials if network request fails
       }
-    }
 
-    setCredentials(creds);
+      setCredentials(creds);
+      setSessionEvents(sessionHistoryService.getEvents());
+
+      if (
+        creds.role === 'receiver' &&
+        isHealthy &&
+        creds.deviceId &&
+        creds.deviceToken &&
+        creds.serverUrl
+      ) {
+        receiverSocketClient.connect(creds.serverUrl, creds.deviceId, creds.deviceToken);
+      }
+    } finally {
+      isLoadingRef.current = false;
+    }
   }, []);
 
+  // Reload automatically on screen focus
+  useFocusEffect(
+    useCallback(() => {
+      loadState();
+    }, [loadState])
+  );
+
+  // Auto-reload history events when new ones are recorded
   useEffect(() => {
     loadState();
+    const unsub = sessionHistoryService.onHistoryChange((events) => {
+      setSessionEvents(events);
+    });
+    return () => unsub();
+  }, [loadState]);
+
+  // Periodic auto-reload so state updates without excessive polling (6s)
+  useEffect(() => {
+    const timer = setInterval(() => {
+      loadState();
+    }, 6000);
+    return () => clearInterval(timer);
   }, [loadState]);
 
   const onRefresh = async () => {
@@ -54,6 +109,8 @@ export default function HomeScreen() {
   };
 
   const isPaired = Boolean(credentials?.deviceId && credentials?.pairedWithId);
+  const role = credentials?.role;
+  const latestEvent = sessionEvents[0];
 
   return (
     <ScrollView
@@ -61,119 +118,240 @@ export default function HomeScreen() {
       contentContainerStyle={styles.content}
       refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
     >
-      {/* Header Info Banner */}
-      <View style={styles.header}>
-        <Text style={styles.appName}>OTP Bridge</Text>
-        <Text style={styles.appSubtitle}>
-          Private, encrypted notification forwarding between Android 14+ devices.
-        </Text>
+      {/* A. Compact Welcome Area (No duplicated OTP Bridge title) */}
+      <View style={styles.welcomeBanner}>
+        <View style={styles.brandIconWrapper}>
+          <Ionicons name="shield-checkmark" size={20} color="#2563EB" />
+        </View>
+        <View style={styles.welcomeTextCol}>
+          <Text style={styles.welcomeSubtitle}>Your private OTP connection</Text>
+        </View>
       </View>
 
-      {/* System Status Card */}
-      <Card>
-        <Text style={styles.sectionTitle}>System Status</Text>
+      {/* B. Connection Overview - Single Compact Unified Card */}
+      <Card style={styles.overviewCard}>
+        <Text style={styles.sectionHeader}>Connection Overview</Text>
 
-        <View style={styles.statusRow}>
-          <Text style={styles.statusLabel}>Backend Server</Text>
-          <StatusBadge
-            label={
-              serverOnline === null
-                ? 'Checking...'
-                : serverOnline
-                ? 'Online'
-                : 'Offline'
-            }
-            variant={
-              serverOnline === null
-                ? 'neutral'
-                : serverOnline
-                ? 'success'
-                : 'error'
-            }
-          />
-        </View>
-
-        <View style={styles.statusRow}>
-          <Text style={styles.statusLabel}>Configured Role</Text>
-          <StatusBadge
-            label={
-              credentials?.role
-                ? credentials.role.toUpperCase()
-                : 'NOT CONFIGURED'
-            }
-            variant={credentials?.role ? 'info' : 'neutral'}
-          />
-        </View>
-
-        <View style={styles.statusRow}>
-          <Text style={styles.statusLabel}>Pairing Status</Text>
-          <StatusBadge
-            label={isPaired ? 'PAIRED' : 'UNPAIRED'}
-            variant={isPaired ? 'success' : 'warning'}
-          />
-        </View>
-
-        {credentials?.role === 'sender' && (
-          <View style={styles.statusRow}>
-            <Text style={styles.statusLabel}>Allowed Apps</Text>
+        <View style={styles.overviewGrid}>
+          {/* Row 1: Server Status */}
+          <View style={styles.overviewRow}>
+            <View style={styles.overviewLabelCol}>
+              <Ionicons
+                name="server-outline"
+                size={16}
+                color="#64748B"
+                style={styles.rowIcon}
+              />
+              <Text style={styles.overviewLabel}>Relay Server</Text>
+            </View>
             <StatusBadge
-              label={`${allowlistCount} Selected`}
-              variant={allowlistCount > 0 ? 'info' : 'warning'}
+              label={
+                serverOnline === null
+                  ? 'Checking...'
+                  : serverOnline
+                  ? 'Online'
+                  : 'Offline'
+              }
+              variant={
+                serverOnline === null
+                  ? 'neutral'
+                  : serverOnline
+                  ? 'success'
+                  : 'error'
+              }
             />
           </View>
-        )}
+
+          {/* Row 2: Configured Role */}
+          <View style={styles.overviewRow}>
+            <View style={styles.overviewLabelCol}>
+              <Ionicons
+                name="phone-portrait-outline"
+                size={16}
+                color="#64748B"
+                style={styles.rowIcon}
+              />
+              <Text style={styles.overviewLabel}>Device Role</Text>
+            </View>
+            <Text style={styles.overviewValue}>
+              {role === 'sender'
+                ? 'Sender'
+                : role === 'receiver'
+                ? 'Receiver'
+                : 'Not Configured'}
+            </Text>
+          </View>
+
+          {/* Row 3: Pairing State */}
+          <View style={styles.overviewRow}>
+            <View style={styles.overviewLabelCol}>
+              <Ionicons
+                name="link-outline"
+                size={16}
+                color="#64748B"
+                style={styles.rowIcon}
+              />
+              <Text style={styles.overviewLabel}>Pairing State</Text>
+            </View>
+            <StatusBadge
+              label={isPaired ? 'PAIRED' : 'UNPAIRED'}
+              variant={isPaired ? 'success' : 'warning'}
+            />
+          </View>
+
+          {/* Row 4: Sources (if Sender) */}
+          {role === 'sender' && (
+            <View style={[styles.overviewRow, { borderBottomWidth: 0 }]}>
+              <View style={styles.overviewLabelCol}>
+                <Ionicons
+                  name="apps-outline"
+                  size={16}
+                  color="#64748B"
+                  style={styles.rowIcon}
+                />
+                <Text style={styles.overviewLabel}>Allowed Sources</Text>
+              </View>
+              <Text style={styles.overviewValue}>
+                {allowlistCount > 0 ? `${allowlistCount} apps` : 'All carriers'}
+              </Text>
+            </View>
+          )}
+        </View>
       </Card>
 
-      {/* Mode Actions */}
-      <Card>
-        <Text style={styles.sectionTitle}>Select Device Mode</Text>
-        <Text style={styles.sectionSubtitle}>
-          Choose how this device should operate in your personal bridge:
-        </Text>
+      {/* C. Primary Action - Single Prioritized Action */}
+      {!role ? (
+        <Card style={styles.actionCard}>
+          <Text style={styles.sectionHeader}>Choose Mode</Text>
+          <Text style={styles.cardDesc}>
+            Select how this device participates in your private bridge:
+          </Text>
 
-        <PrimaryButton
-          title="Phone A (Sender Mode)"
-          onPress={() => router.push('/sender')}
-          variant="primary"
-          style={styles.actionBtn}
-        />
+          <PrimaryButton
+            title="Set Up Sender"
+            onPress={() => router.push('/sender')}
+            variant="primary"
+          />
+          <PrimaryButton
+            title="Set Up Receiver"
+            onPress={() => router.push('/receiver')}
+            variant="secondary"
+          />
+          <PrimaryButton
+            title="Pair New Devices (QR)"
+            onPress={() => router.push('/pairing')}
+            variant="outline"
+          />
+        </Card>
+      ) : !isPaired ? (
+        <Card style={styles.actionCard}>
+          <Text style={styles.sectionHeader}>Pairing Required</Text>
+          <Text style={styles.cardDesc}>
+            Pair this device with your partner phone to activate end-to-end forwarding.
+          </Text>
 
-        <PrimaryButton
-          title="Phone B (Receiver Mode)"
-          onPress={() => router.push('/receiver')}
-          variant="secondary"
-          style={styles.actionBtn}
-        />
+          <PrimaryButton
+            title="Pair Devices (QR)"
+            onPress={() => router.push('/pairing')}
+            variant="primary"
+          />
+        </Card>
+      ) : (
+        /* Configured & Paired: Quick Dashboard Shortcut */
+        <Card style={styles.actionCard}>
+          <Text style={styles.sectionHeader}>Active Session</Text>
+          <Text style={styles.cardDesc}>
+            {role === 'sender'
+              ? 'Ready to capture and forward OTPs to Receiver.'
+              : 'Listening for incoming verification codes from Sender.'}
+          </Text>
 
-        <PrimaryButton
-          title={isPaired ? 'Manage Device Pairing' : 'Pair New Devices (QR)'}
-          onPress={() => router.push('/pairing')}
-          variant="outline"
-          style={styles.actionBtn}
-        />
-      </Card>
+          <PrimaryButton
+            title={role === 'sender' ? 'Open Sender Dashboard' : 'Open Receiver Dashboard'}
+            onPress={() => router.push(role === 'sender' ? '/sender' : '/receiver')}
+            variant="primary"
+          />
 
-      {/* Settings Action */}
-      <View style={styles.footerActions}>
+          <View style={styles.quickNavRow}>
+            {role === 'sender' && (
+              <PrimaryButton
+                title="Manage Apps"
+                onPress={() => router.push('/select-apps')}
+                variant="outline"
+                style={styles.halfBtn}
+              />
+            )}
+            <PrimaryButton
+              title="Pairing Info"
+              onPress={() => router.push('/pairing')}
+              variant="outline"
+              style={role === 'sender' ? styles.halfBtn : styles.fullBtn}
+            />
+          </View>
+        </Card>
+      )}
+
+      {/* D. Active Pairing Summary & Session History Shortcut */}
+      {isPaired && (
+        <Card style={styles.sessionSummaryCard}>
+          <View style={styles.summaryTopRow}>
+            <View>
+              <Text style={styles.sectionHeader}>Session Activity</Text>
+              <Text style={styles.summaryPartnerText}>
+                Bound with {role === 'sender' ? 'Receiver' : 'Sender'}
+              </Text>
+            </View>
+            <TouchableOpacity
+              onPress={() => router.push('/pairing?tab=history')}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            >
+              <Text style={styles.viewHistoryLink}>View History →</Text>
+            </TouchableOpacity>
+          </View>
+
+          {latestEvent ? (
+            <View style={styles.recentEventBox}>
+              <Ionicons
+                name="time-outline"
+                size={15}
+                color="#2563EB"
+                style={{ marginRight: 6 }}
+              />
+              <Text style={styles.recentEventTitle} numberOfLines={1}>
+                {latestEvent.title}
+              </Text>
+              <Text style={styles.recentEventDot}>•</Text>
+              <Text style={styles.recentEventTime}>
+                {new Date(latestEvent.timestamp).toLocaleTimeString([], {
+                  hour: '2-digit',
+                  minute: '2-digit'
+                })}
+              </Text>
+            </View>
+          ) : (
+            <Text style={styles.noEventsText}>No session events recorded yet.</Text>
+          )}
+        </Card>
+      )}
+
+      {/* Secondary Settings Action */}
+      <View style={styles.footerRow}>
         <PrimaryButton
           title="Network & Security Settings"
           onPress={() => router.push('/settings')}
           variant="outline"
         />
-      </View>
 
-      {/* Security Privacy Notice */}
-      <View style={styles.noticeBox}>
-        <Text style={styles.noticeTitle}>Security & Privacy Guarantee</Text>
-        <Text style={styles.noticeText}>
-          • Only notifications from explicitly allowlisted packages are processed.
-        </Text>
-        <Text style={styles.noticeText}>
-          • No SMS inbox permissions requested.
-        </Text>
-        <Text style={styles.noticeText}>
-          • Plain OTP values and message contents are never persisted or logged to disk.
-        </Text>
+        {role && (
+          <TouchableOpacity
+            style={styles.switchModeLink}
+            onPress={() => router.push(role === 'sender' ? '/receiver' : '/sender')}
+          >
+            <Text style={styles.switchModeText}>
+              Switch to {role === 'sender' ? 'Receiver' : 'Sender'} Mode →
+            </Text>
+          </TouchableOpacity>
+        )}
       </View>
     </ScrollView>
   );
@@ -186,35 +364,53 @@ const styles = StyleSheet.create({
   },
   content: {
     padding: 16,
-    paddingBottom: 40
+    paddingBottom: 36
   },
-  header: {
-    marginBottom: 16
+  welcomeBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 14,
+    paddingHorizontal: 4
   },
-  appName: {
-    fontSize: 26,
-    fontWeight: '800',
-    color: '#0F172A',
-    letterSpacing: -0.5
+  brandIconWrapper: {
+    width: 34,
+    height: 34,
+    borderRadius: 10,
+    backgroundColor: '#EFF6FF',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 10,
+    borderWidth: 1,
+    borderColor: '#BFDBFE'
   },
-  appSubtitle: {
+  welcomeTextCol: {
+    flex: 1
+  },
+  welcomeSubtitle: {
     fontSize: 14,
-    color: '#64748B',
-    marginTop: 4,
-    lineHeight: 20
+    fontWeight: '600',
+    color: '#475569'
   },
-  sectionTitle: {
-    fontSize: 16,
+  overviewCard: {
+    padding: 16,
+    marginVertical: 6
+  },
+  sectionHeader: {
+    fontSize: 15,
     fontWeight: '700',
-    color: '#1E293B',
-    marginBottom: 4
+    color: '#0F172A',
+    marginBottom: 6
   },
-  sectionSubtitle: {
+  cardDesc: {
     fontSize: 13,
     color: '#64748B',
-    marginBottom: 12
+    marginBottom: 12,
+    lineHeight: 18
   },
-  statusRow: {
+  overviewGrid: {
+    marginTop: 4
+  },
+  overviewRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
@@ -222,34 +418,102 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: '#F1F5F9'
   },
-  statusLabel: {
-    fontSize: 14,
-    color: '#334155',
+  overviewLabelCol: {
+    flexDirection: 'row',
+    alignItems: 'center'
+  },
+  rowIcon: {
+    marginRight: 8
+  },
+  overviewLabel: {
+    fontSize: 13,
+    color: '#475569',
     fontWeight: '500'
   },
-  actionBtn: {
-    marginVertical: 4
-  },
-  footerActions: {
-    marginTop: 8
-  },
-  noticeBox: {
-    backgroundColor: '#F1F5F9',
-    borderRadius: 12,
-    padding: 14,
-    marginTop: 16,
-    borderLeftWidth: 4,
-    borderLeftColor: '#2563EB'
-  },
-  noticeTitle: {
+  overviewValue: {
     fontSize: 13,
-    fontWeight: '700',
-    color: '#1E293B',
-    marginBottom: 4
+    color: '#0F172A',
+    fontWeight: '600'
   },
-  noticeText: {
+  actionCard: {
+    padding: 16,
+    marginVertical: 6
+  },
+  quickNavRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginTop: 6
+  },
+  halfBtn: {
+    flex: 1,
+    marginVertical: 0
+  },
+  fullBtn: {
+    flex: 1,
+    marginVertical: 0
+  },
+  sessionSummaryCard: {
+    padding: 16,
+    marginVertical: 6
+  },
+  summaryTopRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    marginBottom: 8
+  },
+  summaryPartnerText: {
     fontSize: 12,
-    color: '#475569',
-    lineHeight: 18
+    color: '#64748B',
+    marginTop: 2
+  },
+  viewHistoryLink: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#2563EB'
+  },
+  recentEventBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F8FAFC',
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    marginTop: 4
+  },
+  recentEventTitle: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#1E293B',
+    flexShrink: 1
+  },
+  recentEventDot: {
+    fontSize: 12,
+    color: '#94A3B8',
+    marginHorizontal: 4
+  },
+  recentEventTime: {
+    fontSize: 11,
+    color: '#64748B'
+  },
+  noEventsText: {
+    fontSize: 12,
+    color: '#94A3B8',
+    fontStyle: 'italic',
+    marginTop: 4
+  },
+  footerRow: {
+    marginTop: 12
+  },
+  switchModeLink: {
+    alignItems: 'center',
+    paddingVertical: 10
+  },
+  switchModeText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#2563EB'
   }
 });

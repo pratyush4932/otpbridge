@@ -2,6 +2,7 @@ import {
   getDefaultSmsPackage,
   getInstalledSmsApplications,
   isPackageInstalled,
+  getAppIcon,
   InstalledSmsAppInfo
 } from '../modules/notification-listener';
 import { StorageService } from './storage';
@@ -16,6 +17,7 @@ export interface ActiveCarrierInfo {
   isDefault?: boolean;
   isSystemApp?: boolean;
   limitations?: string;
+  icon?: string;
 }
 
 export interface CarrierRegistrySnapshot {
@@ -73,6 +75,7 @@ class DynamicCarrierRegistry {
     // 3. Resolve Default SMS carrier
     if (detectedDefaultPkg && !ARCHIVED_CARRIER_PACKAGES.has(detectedDefaultPkg)) {
       const match = installedSmsList.find((app) => app.packageName === detectedDefaultPkg);
+      const icon = match?.icon || (await getAppIcon(detectedDefaultPkg)) || undefined;
       this.defaultSms = {
         category: 'default_sms',
         packageName: detectedDefaultPkg,
@@ -80,6 +83,7 @@ class DynamicCarrierRegistry {
         enabled: isDefaultSmsEnabled,
         isDefault: true,
         isSystemApp: match?.isSystemApp ?? true,
+        icon,
         limitations: 'Notification Listener permission required. Must display notification preview.'
       };
     } else {
@@ -98,12 +102,14 @@ class DynamicCarrierRegistry {
       enabled: otherSmsSet.has(app.packageName),
       isDefault: false,
       isSystemApp: app.isSystemApp,
+      icon: app.icon || undefined,
       limitations: 'Notification content may be truncated or subject to notification-access limits.'
     }));
 
     // 5. Resolve Gmail carrier
     const isGmailOnDevice = await isPackageInstalled(GMAIL_PACKAGE_NAME);
     if (isGmailOnDevice) {
+      const gmailIcon = (await getAppIcon(GMAIL_PACKAGE_NAME)) || undefined;
       this.gmail = {
         category: 'gmail',
         packageName: GMAIL_PACKAGE_NAME,
@@ -111,6 +117,7 @@ class DynamicCarrierRegistry {
         enabled: isGmailEnabled,
         isDefault: false,
         isSystemApp: true,
+        icon: gmailIcon,
         limitations: 'Only unredacted, accessible notifications with clear OTP context are processed.'
       };
     } else {

@@ -1,18 +1,24 @@
 import React from 'react';
 import { View, Text, StyleSheet } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
 
 interface EmptyStateProps {
   title: string;
   description: string;
+  iconName?: keyof typeof Ionicons.glyphMap;
   actionText?: string;
   onAction?: () => void;
 }
 
-export function EmptyState({ title, description }: EmptyStateProps) {
+export function EmptyState({
+  title,
+  description,
+  iconName = 'mail-outline'
+}: EmptyStateProps) {
   return (
     <View style={styles.container}>
       <View style={styles.iconCircle}>
-        <Text style={styles.iconText}>✉</Text>
+        <Ionicons name={iconName} size={28} color="#64748B" />
       </View>
       <Text style={styles.title}>{title}</Text>
       <Text style={styles.description}>{description}</Text>
@@ -24,33 +30,31 @@ const styles = StyleSheet.create({
   container: {
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 40,
+    paddingVertical: 36,
     paddingHorizontal: 24
   },
   iconCircle: {
-    width: 64,
-    height: 64,
-    borderRadius: 32,
+    width: 60,
+    height: 60,
+    borderRadius: 30,
     backgroundColor: '#F1F5F9',
     alignItems: 'center',
     justifyContent: 'center',
-    marginBottom: 16
-  },
-  iconText: {
-    fontSize: 28,
-    color: '#64748B'
+    marginBottom: 14,
+    borderWidth: 1,
+    borderColor: '#E2E8F0'
   },
   title: {
-    fontSize: 18,
+    fontSize: 16,
     fontWeight: '700',
     color: '#1E293B',
-    marginBottom: 8,
+    marginBottom: 6,
     textAlign: 'center'
   },
   description: {
-    fontSize: 14,
+    fontSize: 13,
     color: '#64748B',
     textAlign: 'center',
-    lineHeight: 20
+    lineHeight: 19
   }
 });

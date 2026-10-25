@@ -4,13 +4,52 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.drawable.Drawable
 import android.net.Uri
 import android.os.Build
 import android.provider.Telephony
+import android.util.Base64
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
+import java.io.ByteArrayOutputStream
+import java.util.concurrent.ConcurrentHashMap
 
 class NotificationListenerModule : Module() {
+
+    companion object {
+        private val iconCache = ConcurrentHashMap<String, String>()
+    }
+
+    private fun drawableToBitmap(drawable: Drawable, width: Int = 96, height: Int = 96): Bitmap? {
+        return try {
+            val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+            val canvas = Canvas(bitmap)
+            drawable.setBounds(0, 0, canvas.width, canvas.height)
+            drawable.draw(canvas)
+            bitmap
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private fun getAppIconBase64(pm: PackageManager, packageName: String): String? {
+        iconCache[packageName]?.let { return it }
+        return try {
+            val appInfo = pm.getApplicationInfo(packageName, 0)
+            val drawable = pm.getApplicationIcon(appInfo)
+            val bitmap = drawableToBitmap(drawable, 96, 96) ?: return null
+            val outputStream = ByteArrayOutputStream()
+            bitmap.compress(Bitmap.CompressFormat.PNG, 100, outputStream)
+            val base64 = Base64.encodeToString(outputStream.toByteArray(), Base64.NO_WRAP)
+            val dataUri = "data:image/png;base64,$base64"
+            iconCache[packageName] = dataUri
+            dataUri
+        } catch (e: Exception) {
+            null
+        }
+    }
 
     private val context: Context
         get() = appContext.reactContext ?: throw IllegalStateException("React application context is null")
@@ -89,7 +128,8 @@ class NotificationListenerModule : Module() {
                         "packageName" to pkg,
                         "appName" to appName,
                         "isDefault" to (pkg == defaultPkg),
-                        "isSystemApp" to isSystem
+                        "isSystemApp" to isSystem,
+                        "icon" to (getAppIconBase64(pm, pkg) ?: "")
                     )
                 }
             } catch (e: Exception) {
@@ -110,7 +150,8 @@ class NotificationListenerModule : Module() {
                             "packageName" to pkg,
                             "appName" to appName,
                             "isDefault" to (pkg == defaultPkg),
-                            "isSystemApp" to isSystem
+                            "isSystemApp" to isSystem,
+                            "icon" to (getAppIconBase64(pm, pkg) ?: "")
                         )
                     }
                 }
@@ -128,19 +169,25 @@ class NotificationListenerModule : Module() {
                         "packageName" to defaultPkg,
                         "appName" to appName,
                         "isDefault" to true,
-                        "isSystemApp" to isSystem
+                        "isSystemApp" to isSystem,
+                        "icon" to (getAppIconBase64(pm, defaultPkg) ?: "")
                     )
                 } catch (e: Exception) {
                     packageMap[defaultPkg] = mutableMapOf(
                         "packageName" to defaultPkg,
                         "appName" to "Default Messages",
                         "isDefault" to true,
-                        "isSystemApp" to true
+                        "isSystemApp" to true,
+                        "icon" to ""
                     )
                 }
             }
 
             packageMap.values.toList().sortedBy { (it["appName"] as String).lowercase() }
+        }
+
+        AsyncFunction("getAppIcon") { packageName: String ->
+            getAppIconBase64(context.packageManager, packageName)
         }
 
         AsyncFunction("isPackageInstalled") { packageName: String ->
@@ -169,7 +216,8 @@ class NotificationListenerModule : Module() {
                         mapOf(
                             "packageName" to appInfo.packageName,
                             "appName" to appName,
-                            "isSystemApp" to isSystem
+                            "isSystemApp" to isSystem,
+                            "icon" to (getAppIconBase64(pm, appInfo.packageName) ?: "")
                         )
                     )
                 }

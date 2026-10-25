@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View,
   Text,
@@ -8,7 +8,8 @@ import {
   Alert
 } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
-import { useRouter } from 'expo-router';
+import { useRouter, useFocusEffect } from 'expo-router';
+import { Ionicons } from '@expo/vector-icons';
 import { StorageService, AppCredentials } from '../services/storage';
 import {
   receiverSocketClient,
@@ -16,75 +17,130 @@ import {
   ConnectionState
 } from '../services/receiver-socket';
 import { ApiClient } from '../services/api';
+import { sessionHistoryService } from '../services/session-history';
 import { Card } from '../components/Card';
 import { StatusBadge } from '../components/StatusBadge';
 import { PrimaryButton } from '../components/PrimaryButton';
 import { EmptyState } from '../components/EmptyState';
+import { AppIcon } from '../components/AppIcon';
 
 export default function ReceiverScreen() {
   const router = useRouter();
-  const [messages, setMessages] = useState<ReceivedOtpMessage[]>([]);
-  const [connectionStatus, setConnectionStatus] = useState<ConnectionState>('disconnected');
+  const [messages, setMessages] = useState<ReceivedOtpMessage[]>(() =>
+    receiverSocketClient.getMessages()
+  );
+  const [connectionStatus, setConnectionStatus] = useState<ConnectionState>(
+    receiverSocketClient.status
+  );
   const [credentials, setCredentials] = useState<AppCredentials | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [now, setNow] = useState<number>(Date.now());
+  const prevStatusRef = useRef<ConnectionState | null>(null);
+  const isInitializingRef = useRef(false);
 
-  const initReceiver = useCallback(async () => {
-    let creds = await StorageService.getCredentials();
+  const initReceiver = useCallback(async (forceServer = false) => {
+    if (isInitializingRef.current) return;
+    isInitializingRef.current = true;
+    try {
+      await sessionHistoryService.ensureActiveSessionRecorded();
+      let creds = await StorageService.getCredentials();
 
-    if (creds.serverUrl && creds.deviceId && creds.deviceToken) {
-      // Sync fresh pairing status from server
-      const statusRes = await ApiClient.getDeviceStatus(
-        creds.serverUrl,
-        creds.deviceId,
-        creds.deviceToken
-      );
-      if (statusRes.ok && statusRes.device) {
-        if (statusRes.device.pairedWithId !== creds.pairedWithId) {
-          const updated = { pairedWithId: statusRes.device.pairedWithId || null };
-          await StorageService.saveCredentials(updated);
-          creds = { ...creds, ...updated };
+      const isWsConnected = receiverSocketClient.isConnected();
+      if (creds.serverUrl && creds.deviceId && creds.deviceToken && (!isWsConnected || forceServer)) {
+        try {
+          const statusRes = await ApiClient.getDeviceStatus(
+            creds.serverUrl,
+            creds.deviceId,
+            creds.deviceToken
+          );
+          if (statusRes.device) {
+            const partnerId = statusRes.device.isPaired ? statusRes.partner?.id || null : null;
+            if (partnerId !== creds.pairedWithId) {
+              const updated = { pairedWithId: partnerId };
+              await StorageService.saveCredentials(updated);
+              creds = { ...creds, ...updated };
+            }
+          }
+        } catch {
+          // Fall back to locally stored credentials
         }
       }
-    }
 
-    setCredentials(creds);
+      setCredentials(creds);
 
-    if (creds.deviceId && creds.deviceToken && creds.serverUrl) {
-      receiverSocketClient.connect(creds.serverUrl, creds.deviceId, creds.deviceToken);
+      if (creds.deviceId && creds.deviceToken && creds.serverUrl) {
+        receiverSocketClient.connect(creds.serverUrl, creds.deviceId, creds.deviceToken);
+      }
+    } finally {
+      isInitializingRef.current = false;
     }
   }, []);
 
-  useEffect(() => {
-    initReceiver();
+  useFocusEffect(
+    useCallback(() => {
+      initReceiver(true);
+      setMessages(receiverSocketClient.getMessages());
+    }, [initReceiver])
+  );
 
-    const unsubMsg = receiverSocketClient.onMessage((newMsg) => {
-      setMessages((prev) => {
-        // Prevent duplicate message IDs
-        if (prev.some((m) => m.id === newMsg.id)) {
-          return prev;
-        }
-        return [newMsg, ...prev];
-      });
+  useEffect(() => {
+    initReceiver(true);
+
+    receiverSocketClient.loadStoredMessages().then((stored) => {
+      setMessages(stored);
     });
 
-    const unsubStatus = receiverSocketClient.onStatus((status) => {
+    const unsubMsg = receiverSocketClient.onMessagesChange((updated) => {
+      setMessages(updated);
+    });
+
+    const unsubStatus = receiverSocketClient.onStatus(async (status) => {
       setConnectionStatus(status);
+      if (prevStatusRef.current !== null && prevStatusRef.current !== status) {
+        if (status === 'connected') {
+          await sessionHistoryService.recordEvent(
+            'connection_restored',
+            'Connection restored',
+            'Receiver WebSocket reconnected to relay server'
+          );
+        } else if (status === 'disconnected') {
+          await sessionHistoryService.recordEvent(
+            'connection_lost',
+            'Connection lost',
+            'Receiver WebSocket connection closed or interrupted'
+          );
+        }
+      } else if (prevStatusRef.current === null && status === 'connected') {
+        await sessionHistoryService.recordEvent(
+          'connection_established',
+          'Connection established',
+          'Receiver connected to relay server via WebSocket'
+        );
+      }
+      prevStatusRef.current = status;
     });
 
     const unsubPairing = receiverSocketClient.onPairing((partnerId) => {
       setCredentials((prev) => (prev ? { ...prev, pairedWithId: partnerId } : prev));
     });
 
-    // Auto-prune messages older than 5 minutes from state
+    // Periodically sync receiver state with server to pick up pairing changes automatically (8s)
+    const pollTimer = setInterval(() => {
+      initReceiver(false);
+    }, 8000);
+
+    // Auto-prune messages older than 5 minutes from state and tick validity timer
     const pruneTimer = setInterval(() => {
-      const cutoff = Date.now() - 5 * 60 * 1000;
-      setMessages((prev) => prev.filter((m) => m.receivedAt > cutoff));
-    }, 15000);
+      const current = Date.now();
+      setNow(current);
+      setMessages(receiverSocketClient.getMessages());
+    }, 1000);
 
     return () => {
       unsubMsg();
       unsubStatus();
       unsubPairing();
+      clearInterval(pollTimer);
       clearInterval(pruneTimer);
     };
   }, [initReceiver]);
@@ -97,14 +153,15 @@ export default function ReceiverScreen() {
     }, 2000);
   };
 
-  const handleClearMessages = () => {
+  const handleClearMessages = async () => {
+    await receiverSocketClient.clearMessages();
     setMessages([]);
   };
 
   const handleUnlink = () => {
     Alert.alert(
       'Unlink Sender Device',
-      'Are you sure you want to unlink Phone A? You will need to re-pair devices to resume forwarding.',
+      'Are you sure you want to unlink Sender? You will need to re-pair devices to resume forwarding.',
       [
         { text: 'Cancel', style: 'cancel' },
         {
@@ -118,9 +175,20 @@ export default function ReceiverScreen() {
                 credentials.deviceToken
               );
             }
+            await sessionHistoryService.recordEvent(
+              'device_unlinked',
+              'Sender device unlinked',
+              'Sender was unlinked from Receiver'
+            );
+            await sessionHistoryService.recordEvent(
+              'session_ended',
+              'Session ended',
+              'Pairing session terminated'
+            );
+            await receiverSocketClient.clearMessages();
             receiverSocketClient.disconnect();
             await StorageService.clearCredentials();
-            Alert.alert('Unlinked', 'Device has been unlinked successfully.');
+            Alert.alert('Unlinked', 'Device unlinked successfully.');
             router.replace('/');
           }
         }
@@ -136,13 +204,13 @@ export default function ReceiverScreen() {
       <Card style={styles.statusCard}>
         <View style={styles.statusRow}>
           <View style={{ flex: 1 }}>
-            <Text style={styles.headerTitle}>Receiver Dashboard</Text>
+            <Text style={styles.headerTitle}>Receiver Mode</Text>
             <Text style={styles.headerSubtitle}>
-              {credentials?.deviceId ? `Device ID: ${credentials.deviceId}` : 'Unregistered Device'}
+              {isSenderPaired ? 'Connected to Sender' : 'Waiting for pairing'}
             </Text>
           </View>
           <StatusBadge
-            label={connectionStatus === 'connected' ? 'SERVER ONLINE' : connectionStatus.toUpperCase()}
+            label={connectionStatus === 'connected' ? 'ONLINE' : connectionStatus.toUpperCase()}
             variant={
               connectionStatus === 'connected'
                 ? 'success'
@@ -153,88 +221,88 @@ export default function ReceiverScreen() {
           />
         </View>
 
-        {/* Sender Pairing Status Row */}
-        <View style={styles.pairingStatusRow}>
-          <View style={styles.pairingLeft}>
-            <Text style={styles.pairingLabel}>Sender (Phone A):</Text>
-            <StatusBadge
-              label={isSenderPaired ? 'PAIRED' : 'NOT PAIRED'}
-              variant={isSenderPaired ? 'success' : 'warning'}
-            />
-          </View>
-          {isSenderPaired && credentials?.pairedWithId ? (
-            <Text style={styles.partnerIdText} numberOfLines={1}>
-              {credentials.pairedWithId}
-            </Text>
-          ) : null}
-        </View>
-
         {!isSenderPaired && (
           <View style={styles.unpairedNotice}>
             <Text style={styles.unpairedText}>
-              Phone B is connected to relay server, but not paired with Phone A yet.
+              Receiver is connected to the server, but not paired with Sender yet.
             </Text>
             <PrimaryButton
-              title="Pair with Phone A"
+              title="Pair with Sender"
               onPress={() => router.push('/pairing')}
               variant="outline"
+              style={{ marginVertical: 0 }}
             />
           </View>
         )}
 
-        {isSenderPaired && messages.length > 0 && (
-          <View style={styles.actionRow}>
-            <TouchableOpacity onPress={handleClearMessages}>
-              <Text style={styles.clearBtnText}>Clear All ({messages.length})</Text>
-            </TouchableOpacity>
-            <TouchableOpacity onPress={handleUnlink}>
-              <Text style={styles.unlinkBtnText}>Unlink Phone A</Text>
-            </TouchableOpacity>
+        <View style={styles.actionRow}>
+          <TouchableOpacity onPress={() => router.push('/pairing?tab=history')}>
+            <Text style={styles.historyBtnText}>Session History →</Text>
+          </TouchableOpacity>
+          <View style={{ flexDirection: 'row', gap: 14 }}>
+            {messages.length > 0 && (
+              <TouchableOpacity onPress={handleClearMessages}>
+                <Text style={styles.clearBtnText}>Clear ({messages.length})</Text>
+              </TouchableOpacity>
+            )}
+            {isSenderPaired && (
+              <TouchableOpacity onPress={handleUnlink}>
+                <Text style={styles.unlinkBtnText}>Unlink</Text>
+              </TouchableOpacity>
+            )}
           </View>
-        )}
+        </View>
       </Card>
 
       {/* Messages List */}
       <FlatList
         data={messages}
         keyExtractor={(item) => item.id}
+        keyboardShouldPersistTaps="handled"
         contentContainerStyle={styles.listContent}
         ListEmptyComponent={
           <EmptyState
-            title="Waiting for OTPs"
-            description="When authorized notifications arrive on Phone A, their verification codes will appear here in real-time."
+            title="Waiting for verification codes"
+            description="When authorized OTP notifications arrive on Sender, their codes will appear here in real-time."
+            iconName="shield-checkmark-outline"
           />
         }
         renderItem={({ item }) => {
           const isCopied = copiedId === item.id;
-          const timeAgo = Math.max(0, Math.floor((Date.now() - item.receivedAt) / 1000));
+          const timeElapsed = Math.max(0, Math.floor((now - item.receivedAt) / 1000));
+          const remainingSecs = Math.max(0, 300 - timeElapsed);
+          const serviceDisplay =
+            item.serviceName || item.packageName.split('.').pop() || 'Verification';
 
           return (
             <Card style={styles.otpCard}>
               <View style={styles.cardTopRow}>
-                <View style={styles.badgeGroup}>
-                  <View style={styles.appBadge}>
-                    <Text style={styles.appBadgeText}>
-                      {item.serviceName || item.packageName.split('.').pop() || item.packageName}
+                <View style={styles.serviceHeader}>
+                  <AppIcon
+                    appName={serviceDisplay}
+                    size={36}
+                    style={{ marginRight: 10 }}
+                  />
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.serviceTitle} numberOfLines={1}>
+                      {serviceDisplay}
                     </Text>
+                    {item.carrierTag ? (
+                      <Text style={styles.carrierTagText}>{item.carrierTag}</Text>
+                    ) : null}
                   </View>
-                  {item.carrierTag ? (
-                    <View style={styles.carrierBadge}>
-                      <Text style={styles.carrierBadgeText}>{item.carrierTag}</Text>
-                    </View>
-                  ) : null}
                 </View>
-                <Text style={styles.timeText}>
-                  {timeAgo < 60 ? `${timeAgo}s ago` : `${Math.floor(timeAgo / 60)}m ago`}
-                  {item.wasQueued ? ' • Queued' : ''}
-                </Text>
+
+                <View style={styles.timeTag}>
+                  <Text style={styles.validityText}>
+                    {remainingSecs > 0
+                      ? `${Math.floor(remainingSecs / 60)}m ${remainingSecs % 60}s left`
+                      : 'Expired'}
+                  </Text>
+                </View>
               </View>
 
-              {item.title ? (
-                <Text style={styles.titleText}>{item.title}</Text>
-              ) : null}
-
-              {/* Prominent OTP Code Display */}
+              {/* Prominent OTP Code Container */}
               <View style={styles.codeContainer}>
                 <Text style={styles.otpText} selectable>
                   {item.otpCode}
@@ -244,8 +312,14 @@ export default function ReceiverScreen() {
                   onPress={() => handleCopyCode(item.id, item.otpCode)}
                   activeOpacity={0.7}
                 >
-                  <Text style={[styles.copyBtnText, isCopied && styles.copiedBtnText]}>
-                    {isCopied ? '✓ Copied' : 'Copy Code'}
+                  <Ionicons
+                    name={isCopied ? 'checkmark-outline' : 'copy-outline'}
+                    size={16}
+                    color="#FFFFFF"
+                    style={{ marginRight: 4 }}
+                  />
+                  <Text style={styles.copyBtnText}>
+                    {isCopied ? 'Copied' : 'Copy'}
                   </Text>
                 </TouchableOpacity>
               </View>
@@ -271,7 +345,8 @@ const styles = StyleSheet.create({
   statusCard: {
     marginHorizontal: 16,
     marginTop: 12,
-    marginBottom: 8
+    marginBottom: 4,
+    padding: 14
   },
   statusRow: {
     flexDirection: 'row',
@@ -279,41 +354,20 @@ const styles = StyleSheet.create({
     alignItems: 'center'
   },
   headerTitle: {
-    fontSize: 18,
+    fontSize: 17,
     fontWeight: '700',
     color: '#0F172A'
   },
   headerSubtitle: {
-    fontSize: 12,
+    fontSize: 13,
     color: '#64748B',
     marginTop: 2
   },
-  pairingStatusRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
+  unpairedNotice: {
     marginTop: 10,
-    paddingTop: 8,
+    paddingTop: 10,
     borderTopWidth: 1,
     borderTopColor: '#F1F5F9'
-  },
-  pairingLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8
-  },
-  pairingLabel: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: '#475569'
-  },
-  partnerIdText: {
-    fontSize: 11,
-    color: '#64748B',
-    maxWidth: 150
-  },
-  unpairedNotice: {
-    marginTop: 12
   },
   unpairedText: {
     fontSize: 13,
@@ -324,28 +378,33 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginTop: 12,
+    marginTop: 10,
     paddingTop: 10,
     borderTopWidth: 1,
     borderTopColor: '#F1F5F9'
   },
+  historyBtnText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#2563EB'
+  },
   clearBtnText: {
-    fontSize: 13,
+    fontSize: 12,
     fontWeight: '600',
     color: '#64748B'
   },
   unlinkBtnText: {
-    fontSize: 13,
+    fontSize: 12,
     fontWeight: '600',
     color: '#DC2626'
   },
   listContent: {
     padding: 16,
-    paddingBottom: 40
+    paddingBottom: 32
   },
   otpCard: {
-    marginVertical: 6,
-    padding: 16,
+    marginVertical: 5,
+    padding: 14,
     borderLeftWidth: 4,
     borderLeftColor: '#2563EB'
   },
@@ -353,44 +412,30 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 6
+    marginBottom: 8
   },
-  badgeGroup: {
+  serviceHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6
+    flex: 1
   },
-  appBadge: {
-    backgroundColor: '#EFF6FF',
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 6
-  },
-  appBadgeText: {
-    fontSize: 12,
+  serviceTitle: {
+    fontSize: 15,
     fontWeight: '700',
-    color: '#1D4ED8'
+    color: '#0F172A'
   },
-  carrierBadge: {
-    backgroundColor: '#F1F5F9',
-    paddingHorizontal: 6,
-    paddingVertical: 3,
-    borderRadius: 6
+  carrierTagText: {
+    fontSize: 11,
+    color: '#64748B',
+    marginTop: 1
   },
-  carrierBadgeText: {
+  timeTag: {
+    alignItems: 'flex-end'
+  },
+  validityText: {
     fontSize: 11,
     fontWeight: '600',
-    color: '#475569'
-  },
-  timeText: {
-    fontSize: 11,
-    color: '#94A3B8'
-  },
-  titleText: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#334155',
-    marginBottom: 6
+    color: '#2563EB'
   },
   codeContainer: {
     flexDirection: 'row',
@@ -398,21 +443,24 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     backgroundColor: '#F8FAFC',
     borderRadius: 10,
-    padding: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
     borderWidth: 1,
     borderColor: '#E2E8F0',
-    marginVertical: 6
+    marginVertical: 4
   },
   otpText: {
     fontSize: 24,
     fontWeight: '800',
-    letterSpacing: 2,
+    letterSpacing: 2.5,
     color: '#0F172A',
     fontFamily: 'monospace'
   },
   copyBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
     backgroundColor: '#2563EB',
-    paddingHorizontal: 14,
+    paddingHorizontal: 12,
     paddingVertical: 8,
     borderRadius: 8
   },
@@ -423,9 +471,6 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontSize: 13,
     fontWeight: '600'
-  },
-  copiedBtnText: {
-    color: '#FFFFFF'
   },
   snippetText: {
     fontSize: 12,

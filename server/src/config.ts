@@ -8,7 +8,7 @@ const envSchema = z.object({
   HOST: z.string().default('0.0.0.0'),
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
   MAX_PAYLOAD_SIZE_BYTES: z.coerce.number().default(16384),
-  RATE_LIMIT_MAX: z.coerce.number().default(60),
+  RATE_LIMIT_MAX: z.coerce.number().default(300),
   RATE_LIMIT_TIME_WINDOW_MS: z.coerce.number().default(60000),
   PAIRING_TOKEN_TTL_SECONDS: z.coerce.number().default(300),
   MESSAGE_QUEUE_TTL_SECONDS: z.coerce.number().default(300),

@@ -15,6 +15,7 @@ export interface InstalledAppInfo {
   packageName: string;
   appName: string;
   isSystemApp: boolean;
+  icon?: string;
 }
 
 export interface InstalledSmsAppInfo {
@@ -22,6 +23,7 @@ export interface InstalledSmsAppInfo {
   appName: string;
   isDefault: boolean;
   isSystemApp: boolean;
+  icon?: string;
 }
 
 // Fallback in-memory synthetic bus for unit tests & non-Android environments
@@ -98,6 +100,13 @@ export async function isPackageInstalled(packageName: string): Promise<boolean> 
     return await nativeModule.isPackageInstalled(packageName);
   }
   return mockInstalledPackages.has(packageName);
+}
+
+export async function getAppIcon(packageName: string): Promise<string | null> {
+  if (nativeModule?.getAppIcon) {
+    return await nativeModule.getAppIcon(packageName);
+  }
+  return null;
 }
 
 export async function simulateNotification(

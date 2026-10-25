@@ -9,11 +9,10 @@ import {
   AppState,
   TouchableOpacity
 } from 'react-native';
-import { useRouter } from 'expo-router';
+import { useRouter, useFocusEffect } from 'expo-router';
 import {
   isNotificationPermissionGranted,
-  openNotificationListenerSettings,
-  simulateNotification
+  openNotificationListenerSettings
 } from '../modules/notification-listener';
 import { StorageService, AppCredentials } from '../services/storage';
 import { carrierRegistry } from '../services/carrier-registry';
@@ -21,6 +20,7 @@ import {
   notificationPipeline,
   PipelineActivityItem
 } from '../services/notification-pipeline';
+import { sessionHistoryService } from '../services/session-history';
 import { Card } from '../components/Card';
 import { StatusBadge } from '../components/StatusBadge';
 import { PrimaryButton } from '../components/PrimaryButton';
@@ -34,9 +34,9 @@ export default function SenderScreen() {
   const [carrierCount, setCarrierCount] = useState<number>(0);
   const [targetCount, setTargetCount] = useState<number>(0);
   const [activityLog, setActivityLog] = useState<PipelineActivityItem[]>([]);
-  const [simulating, setSimulating] = useState<boolean>(false);
 
   const checkPermissionAndState = useCallback(async () => {
+    await sessionHistoryService.ensureActiveSessionRecorded();
     const granted = await isNotificationPermissionGranted();
     setPermissionGranted(granted);
 
@@ -56,27 +56,36 @@ export default function SenderScreen() {
     setActivityLog(notificationPipeline.getRecentActivity());
   }, []);
 
+  useFocusEffect(
+    useCallback(() => {
+      checkPermissionAndState();
+    }, [checkPermissionAndState])
+  );
+
   useEffect(() => {
     checkPermissionAndState();
 
-    // Start pipeline listener
     notificationPipeline.start();
 
-    // Subscribe to new pipeline activities
     const unsubActivity = notificationPipeline.onActivity((newItem) => {
       setActivityLog((prev) => [newItem, ...prev.slice(0, 49)]);
     });
 
-    // Re-check permission when app returns to foreground from system settings
     const subAppState = AppState.addEventListener('change', (nextState) => {
       if (nextState === 'active') {
         checkPermissionAndState();
       }
     });
 
+    // Auto-refresh state every 6 seconds so pairing changes and permissions reflect smoothly
+    const pollInterval = setInterval(() => {
+      checkPermissionAndState();
+    }, 6000);
+
     return () => {
       unsubActivity();
       subAppState.remove();
+      clearInterval(pollInterval);
     };
   }, [checkPermissionAndState]);
 
@@ -91,28 +100,8 @@ export default function SenderScreen() {
     } catch {
       Alert.alert(
         'Manual Permission Required',
-        'Please open Android Settings -> Apps -> Special app access -> Notification access, and allow OTP Bridge.'
+        'Open Android Settings -> Apps -> Special app access -> Notification access, and allow OTP Bridge.'
       );
-    }
-  };
-
-  const handleTriggerSyntheticOtp = async () => {
-    setSimulating(true);
-    const syntheticCode = Math.floor(100000 + Math.random() * 900000).toString();
-    const targets = await StorageService.getTargetApps();
-    const targetName = targets.length > 0 ? targets[0].appName : 'Swiggy';
-    const pkg = 'com.google.android.apps.messaging';
-
-    try {
-      await simulateNotification(
-        pkg,
-        `AX-${targetName.toUpperCase()}`,
-        `Your ${targetName} verification OTP is ${syntheticCode}. Valid for 5 minutes.`
-      );
-    } catch (e: any) {
-      Alert.alert('Simulation Error', e.message || 'Failed to inject notification');
-    } finally {
-      setTimeout(() => setSimulating(false), 300);
     }
   };
 
@@ -120,41 +109,40 @@ export default function SenderScreen() {
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
-      {/* Permission Status Alert */}
-      {!permissionGranted ? (
+      {/* Compact Section Context Header */}
+      <View style={styles.topHeaderRow}>
+        <Text style={styles.sectionHeading}>Sender Mode</Text>
+        <TouchableOpacity
+          onPress={() => router.push('/pairing?tab=history')}
+          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+        >
+          <Text style={styles.historyLinkText}>Session History →</Text>
+        </TouchableOpacity>
+      </View>
+
+      {/* Permission Warning Card - Shown ONLY when permission is missing */}
+      {!permissionGranted && (
         <Card style={styles.warningCard}>
           <Text style={styles.warningTitle}>Notification Access Required</Text>
           <Text style={styles.warningText}>
-            Android requires explicit Notification Listener permission so the app can detect OTP notifications from selected apps.
+            Grant Notification Listener permission so Sender can detect verification codes from your chosen apps.
           </Text>
           <PrimaryButton
             title="Grant Notification Access"
             onPress={handleOpenSettings}
-            variant="primary"
-            style={styles.permissionBtn}
+            variant="danger"
+            style={{ marginVertical: 0 }}
           />
-        </Card>
-      ) : (
-        <Card style={styles.grantedCard}>
-          <View style={styles.grantedRow}>
-            <View>
-              <Text style={styles.grantedTitle}>Notification Access Granted</Text>
-              <Text style={styles.grantedSubtitle}>Android listener service is authorized</Text>
-            </View>
-            <StatusBadge label="ACTIVE" variant="success" />
-          </View>
         </Card>
       )}
 
-      {/* Main Sender Controls */}
+      {/* Main Forwarding Status & Controls */}
       <Card>
-        <Text style={styles.cardHeader}>Forwarding Controls</Text>
-
         <View style={styles.controlRow}>
           <View style={styles.controlTextCol}>
-            <Text style={styles.controlTitle}>Forwarding Active</Text>
-            <Text style={styles.controlDesc}>
-              Immediately halts or resumes notification transmission.
+            <Text style={styles.cardHeader}>Forwarding Active</Text>
+            <Text style={styles.cardDesc}>
+              {forwardingEnabled ? 'Actively forwarding OTPs to Receiver' : 'Forwarding temporarily paused'}
             </Text>
           </View>
           <Switch
@@ -176,57 +164,39 @@ export default function SenderScreen() {
         </View>
 
         <View style={styles.infoRow}>
-          <Text style={styles.infoLabel}>Universal Carriers</Text>
-          <TouchableOpacity onPress={() => router.push('/select-apps')}>
-            <Text style={styles.linkText}>
-              {carrierCount} active →
-            </Text>
-          </TouchableOpacity>
+          <Text style={styles.infoLabel}>Active Carriers</Text>
+          <Text style={styles.infoValue}>
+            {carrierCount} active
+          </Text>
         </View>
 
         <View style={styles.infoRow}>
           <Text style={styles.infoLabel}>Target Services</Text>
-          <TouchableOpacity onPress={() => router.push('/select-apps')}>
-            <Text style={styles.linkText}>
-              {targetCount} selected →
-            </Text>
-          </TouchableOpacity>
+          <Text style={styles.infoValue}>
+            {targetCount > 0 ? `${targetCount} selected` : 'All carriers forwarded'}
+          </Text>
         </View>
-      </Card>
-
-      {/* App Allowlist Button */}
-      <PrimaryButton
-        title={`Configure Carriers & Applications`}
-        onPress={() => router.push('/select-apps')}
-        variant="secondary"
-      />
-
-      {/* Synthetic Test Pathway Card */}
-      <Card>
-        <Text style={styles.cardHeader}>Synthetic Notification Test</Text>
-        <Text style={styles.cardDesc}>
-          Test the native listener, allowlist filter, OTP detection, and server relay pipeline without waiting for a real SMS/OTP.
-        </Text>
 
         <PrimaryButton
-          title={simulating ? 'Processing...' : 'Simulate Incoming OTP Notification'}
-          onPress={handleTriggerSyntheticOtp}
-          variant="outline"
-          loading={simulating}
+          title="Configure Carriers & Applications"
+          onPress={() => router.push('/select-apps')}
+          variant="secondary"
+          style={{ marginTop: 12 }}
         />
       </Card>
 
-      {/* Live Activity Feed */}
+      {/* Recent Activity Log */}
       <Card>
-        <Text style={styles.cardHeader}>Recent Activity (Redacted)</Text>
-        <Text style={styles.cardDesc}>
-          Only safe metadata is recorded. Actual OTP values are never stored.
-        </Text>
+        <View style={styles.activityTitleRow}>
+          <Text style={styles.cardHeader}>Recent Activity</Text>
+          <Text style={styles.safeNotice}>Zero-storage • Redacted</Text>
+        </View>
 
         {activityLog.length === 0 ? (
           <EmptyState
-            title="No activity recorded yet"
-            description="Incoming notifications matching your allowlist will appear here."
+            title="No activity recorded"
+            description="Incoming OTP notifications from your allowed apps will appear here."
+            iconName="notifications-outline"
           />
         ) : (
           activityLog.slice(0, 15).map((item) => (
@@ -261,11 +231,10 @@ export default function SenderScreen() {
         )}
       </Card>
 
-      {/* Battery Notice */}
+      {/* Subtle Battery Optimization Note */}
       <View style={styles.batteryNotice}>
-        <Text style={styles.batteryTitle}>Android 14+ Battery Notice</Text>
         <Text style={styles.batteryText}>
-          To ensure background forwarding while the screen is off, set OTP Bridge's battery usage to "Unrestricted" in Android App Settings.
+          Tip: Set battery usage to "Unrestricted" in Android App Settings for reliable screen-off forwarding.
         </Text>
       </View>
     </ScrollView>
@@ -279,17 +248,34 @@ const styles = StyleSheet.create({
   },
   content: {
     padding: 16,
-    paddingBottom: 40
+    paddingBottom: 32
+  },
+  topHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 12
+  },
+  sectionHeading: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#0F172A'
+  },
+  historyLinkText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#2563EB'
   },
   warningCard: {
     backgroundColor: '#FEF2F2',
-    borderColor: '#FECACA'
+    borderColor: '#FECACA',
+    padding: 14
   },
   warningTitle: {
-    fontSize: 16,
+    fontSize: 15,
     fontWeight: '700',
     color: '#991B1B',
-    marginBottom: 6
+    marginBottom: 4
   },
   warningText: {
     fontSize: 13,
@@ -297,58 +283,24 @@ const styles = StyleSheet.create({
     lineHeight: 18,
     marginBottom: 12
   },
-  permissionBtn: {
-    backgroundColor: '#DC2626'
-  },
-  grantedCard: {
-    backgroundColor: '#F0FDF4',
-    borderColor: '#BBF7D0'
-  },
-  grantedRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center'
-  },
-  grantedTitle: {
+  cardHeader: {
     fontSize: 15,
     fontWeight: '700',
-    color: '#166534'
-  },
-  grantedSubtitle: {
-    fontSize: 12,
-    color: '#15803D'
-  },
-  cardHeader: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: '#0F172A',
-    marginBottom: 4
+    color: '#0F172A'
   },
   cardDesc: {
     fontSize: 13,
     color: '#64748B',
-    marginBottom: 12,
-    lineHeight: 18
+    marginTop: 2
   },
   controlRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingVertical: 4
+    justifyContent: 'space-between'
   },
   controlTextCol: {
     flex: 1,
     paddingRight: 16
-  },
-  controlTitle: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: '#1E293B'
-  },
-  controlDesc: {
-    fontSize: 12,
-    color: '#64748B',
-    marginTop: 2
   },
   divider: {
     height: 1,
@@ -359,16 +311,27 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    paddingVertical: 8
+    paddingVertical: 6
   },
   infoLabel: {
-    fontSize: 14,
+    fontSize: 13,
     color: '#475569'
   },
-  linkText: {
+  infoValue: {
     fontSize: 13,
     fontWeight: '600',
-    color: '#2563EB'
+    color: '#1E293B'
+  },
+  activityTitleRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8
+  },
+  safeNotice: {
+    fontSize: 11,
+    color: '#94A3B8',
+    fontWeight: '500'
   },
   activityItem: {
     paddingVertical: 10,
@@ -398,22 +361,13 @@ const styles = StyleSheet.create({
     marginTop: 2
   },
   batteryNotice: {
-    backgroundColor: '#F1F5F9',
-    padding: 14,
-    borderRadius: 12,
-    marginTop: 12,
-    borderLeftWidth: 4,
-    borderLeftColor: '#F59E0B'
-  },
-  batteryTitle: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: '#92400E',
-    marginBottom: 2
+    paddingVertical: 10,
+    paddingHorizontal: 8,
+    alignItems: 'center'
   },
   batteryText: {
     fontSize: 12,
-    color: '#78350F',
-    lineHeight: 18
+    color: '#64748B',
+    textAlign: 'center'
   }
 });

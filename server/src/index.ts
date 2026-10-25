@@ -34,7 +34,22 @@ export async function buildApp(): Promise<FastifyInstance> {
 
   await app.register(rateLimit, {
     max: config.RATE_LIMIT_MAX,
-    timeWindow: config.RATE_LIMIT_TIME_WINDOW_MS
+    timeWindow: config.RATE_LIMIT_TIME_WINDOW_MS,
+    allowList: (req) => {
+      const url = req.raw.url || req.url || '';
+      return (
+        url.startsWith('/ws') ||
+        url === '/api/health' ||
+        url.startsWith('/api/health?') ||
+        url === '/api/messages/unlisted' ||
+        url.startsWith('/api/messages/unlisted?')
+      );
+    },
+    errorResponseBuilder: (_req, context) => ({
+      statusCode: 429,
+      error: 'Too Many Requests',
+      message: `Rate limit exceeded, retry in ${Math.ceil(context.ttl / 1000)} seconds`
+    })
   });
 
   await app.register(fastifyWebsocket, {
@@ -45,7 +60,7 @@ export async function buildApp(): Promise<FastifyInstance> {
 
   // WebSocket Route for Receiver clients
   app.register(async (instance) => {
-    instance.get('/ws', { websocket: true }, (connection) => {
+    instance.get('/ws', { websocket: true, config: { rateLimit: false } }, (connection) => {
       wsManager.handleConnection(connection);
     });
   });

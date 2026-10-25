@@ -129,7 +129,7 @@ export async function messageRoutes(app: FastifyInstance) {
   });
 
   // Diagnostic route: Log ignored/unlisted notification unmasked to the server terminal
-  app.post('/api/messages/unlisted', async (req, reply) => {
+  app.post('/api/messages/unlisted', { config: { rateLimit: false } }, async (req, reply) => {
     const { packageName, title, body, reason } = (req.body as any) || {};
 
     console.log('\n================ [IGNORED UNLISTED NOTIFICATION] ================');
