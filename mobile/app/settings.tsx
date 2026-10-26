@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View,
   Text,
@@ -10,6 +10,7 @@ import {
 } from 'react-native';
 import { useRouter, useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
+import * as Clipboard from 'expo-clipboard';
 import { StorageService, AppCredentials, DEFAULT_SERVER_URL } from '../services/storage';
 import { ApiClient } from '../services/api';
 import { sessionHistoryService } from '../services/session-history';
@@ -26,48 +27,71 @@ export default function SettingsScreen() {
   const [revoking, setRevoking] = useState(false);
   const [showDiagnostics, setShowDiagnostics] = useState(false);
 
-  const load = useCallback(async () => {
+  // Track initialization so clearing the field doesn't trigger auto-reversion to old URL
+  const isInitializedRef = useRef(false);
+
+  const load = useCallback(async (force = false) => {
     const creds = await StorageService.getCredentials();
     setCredentials(creds);
-    setServerUrl((prev) => (prev ? prev : creds.serverUrl || DEFAULT_SERVER_URL));
+    if (!isInitializedRef.current || force) {
+      isInitializedRef.current = true;
+      setServerUrl(creds.serverUrl || '');
+    }
   }, []);
 
   useFocusEffect(
     useCallback(() => {
-      load();
-    }, [load])
+      StorageService.getCredentials().then((creds) => {
+        setCredentials(creds);
+        if (!isInitializedRef.current) {
+          isInitializedRef.current = true;
+          setServerUrl(creds.serverUrl || '');
+        }
+      });
+    }, [])
   );
 
   useEffect(() => {
     load();
-    const interval = setInterval(() => {
-      load();
+    // Periodic refresh ONLY updates device credentials, NEVER overwrites user input in serverUrl!
+    const interval = setInterval(async () => {
+      const creds = await StorageService.getCredentials();
+      setCredentials(creds);
     }, 3000);
     return () => clearInterval(interval);
   }, [load]);
 
   const handleTestConnection = async () => {
+    const targetUrl = serverUrl.trim().replace(/\/+$/, '');
+    if (!targetUrl) {
+      Alert.alert('Empty URL', 'Please enter a server URL to test.');
+      return;
+    }
     setTesting(true);
-    const ok = await ApiClient.checkHealth(serverUrl);
+    const ok = await ApiClient.checkHealth(targetUrl);
     setTesting(false);
 
     if (ok) {
-      Alert.alert('Connection Successful', `Connected to server:\n${serverUrl}`);
+      Alert.alert('Connection Successful', `Connected to server:\n${targetUrl}`);
     } else {
       Alert.alert(
         'Connection Failed',
-        `Unable to reach server at:\n${serverUrl}\n\nEnsure your relay server is running and accessible over your local network or Tailscale.`
+        `Unable to reach server at:\n${targetUrl}\n\nEnsure your relay server is running and accessible.`
       );
     }
   };
 
   const handleSaveServerUrl = async () => {
-    setSaving(true);
     const cleaned = serverUrl.trim().replace(/\/+$/, '');
+    if (!cleaned) {
+      Alert.alert('Empty URL', 'Please enter a valid Server URL (e.g. https://otp-bridge-server.onrender.com).');
+      return;
+    }
+    setSaving(true);
     await StorageService.saveCredentials({ serverUrl: cleaned });
     setServerUrl(cleaned);
     setSaving(false);
-    Alert.alert('Saved', 'Server URL updated successfully.');
+    Alert.alert('Saved', `Server URL updated successfully to:\n${cleaned}`);
   };
 
   const handleRevokeDevice = () => {
@@ -123,15 +147,42 @@ export default function SettingsScreen() {
         </Text>
 
         <Text style={styles.inputLabel}>Server URL</Text>
-        <TextInput
-          style={styles.input}
-          placeholder="http://192.168.1.X:4000"
-          placeholderTextColor="#94A3B8"
-          value={serverUrl}
-          onChangeText={setServerUrl}
-          autoCapitalize="none"
-          autoCorrect={false}
-        />
+        <View style={styles.inputWrapper}>
+          <TextInput
+            style={[styles.input, { paddingRight: 40 }]}
+            placeholder="https://otp-bridge-server.onrender.com"
+            placeholderTextColor="#94A3B8"
+            value={serverUrl}
+            onChangeText={setServerUrl}
+            autoCapitalize="none"
+            autoCorrect={false}
+          />
+          {serverUrl.length > 0 && (
+            <TouchableOpacity
+              style={styles.clearBtn}
+              onPress={() => setServerUrl('')}
+              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+            >
+              <Ionicons name="close-circle" size={18} color="#94A3B8" />
+            </TouchableOpacity>
+          )}
+        </View>
+
+        <View style={styles.inputActionsRow}>
+          <TouchableOpacity
+            onPress={async () => {
+              const text = await Clipboard.getStringAsync();
+              if (text) setServerUrl(text.trim());
+            }}
+          >
+            <Text style={styles.actionLinkText}>📋 Paste from Clipboard</Text>
+          </TouchableOpacity>
+          {serverUrl !== DEFAULT_SERVER_URL && (
+            <TouchableOpacity onPress={() => setServerUrl(DEFAULT_SERVER_URL)}>
+              <Text style={styles.actionLinkTextMuted}>Reset to Default</Text>
+            </TouchableOpacity>
+          )}
+        </View>
 
         <View style={styles.btnRow}>
           <PrimaryButton
@@ -335,5 +386,30 @@ const styles = StyleSheet.create({
     color: '#B91C1C',
     lineHeight: 18,
     marginBottom: 12
+  },
+  inputWrapper: {
+    position: 'relative',
+    justifyContent: 'center'
+  },
+  clearBtn: {
+    position: 'absolute',
+    right: 12,
+    top: 13
+  },
+  inputActionsRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 14,
+    marginTop: -4
+  },
+  actionLinkText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#2563EB'
+  },
+  actionLinkTextMuted: {
+    fontSize: 12,
+    color: '#64748B'
   }
 });

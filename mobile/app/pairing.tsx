@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   View,
   Text,
@@ -13,6 +13,7 @@ import { useRouter, useLocalSearchParams, useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import QRCode from 'react-native-qrcode-svg';
 import { CameraView, useCameraPermissions } from 'expo-camera';
+import * as Clipboard from 'expo-clipboard';
 import { StorageService } from '../services/storage';
 import { ApiClient } from '../services/api';
 import { sessionHistoryService, SessionEvent } from '../services/session-history';
@@ -37,6 +38,9 @@ export default function PairingScreen() {
 
   // Generator (Receiver) State
   const [pairingPayload, setPairingPayload] = useState<string | null>(null);
+  const [pairingTokenOnly, setPairingTokenOnly] = useState<string | null>(null);
+  const [currentServerUrl, setCurrentServerUrl] = useState<string>('');
+  const [copiedToken, setCopiedToken] = useState(false);
   const [expiresAt, setExpiresAt] = useState<number | null>(null);
   const [timeLeft, setTimeLeft] = useState<number>(0);
   const [generating, setGenerating] = useState(false);
@@ -45,10 +49,28 @@ export default function PairingScreen() {
   const [permission, requestPermission] = useCameraPermissions();
   const [scanned, setScanned] = useState(false);
   const [completing, setCompleting] = useState(false);
+  const [torchEnabled, setTorchEnabled] = useState(false);
 
   // Manual fallback inputs
   const [manualServerUrl, setManualServerUrl] = useState('');
   const [manualToken, setManualToken] = useState('');
+
+  // Memoized barcode settings to avoid camera analyzer re-initialization on re-renders
+  const qrBarcodeScannerSettings = useMemo(
+    () => ({
+      barcodeTypes: ['qr' as const]
+    }),
+    []
+  );
+
+  useEffect(() => {
+    StorageService.getCredentials().then((creds) => {
+      if (creds.serverUrl) {
+        setCurrentServerUrl(creds.serverUrl);
+        setManualServerUrl(creds.serverUrl);
+      }
+    });
+  }, []);
 
   // Active Session Events
   const [sessionEvents, setSessionEvents] = useState<SessionEvent[]>(() =>
@@ -182,15 +204,25 @@ export default function PairingScreen() {
         }
       }
 
+      // Prioritize client's working serverUrl over any internal/proxy host returned by server
+      const effectiveServerUrl = (
+        creds.serverUrl ||
+        result.serverUrl ||
+        ''
+      ).trim().replace(/\/+$/, '');
+
+      setCurrentServerUrl(effectiveServerUrl);
+      setPairingTokenOnly(result.pairingToken);
+
       await StorageService.saveCredentials({
         role: 'receiver',
         deviceId: result.receiverDevice.id,
         deviceToken: result.receiverDevice.token || creds.deviceToken,
-        serverUrl: result.serverUrl
+        serverUrl: effectiveServerUrl
       });
 
       const qrData = JSON.stringify({
-        s: result.serverUrl,
+        s: effectiveServerUrl,
         t: result.pairingToken
       });
 
@@ -211,8 +243,23 @@ export default function PairingScreen() {
   };
 
   const handleCompletePairing = async (serverUrl: string, token: string) => {
-    if (!token || !serverUrl) {
+    let cleanUrl = (serverUrl || '').trim().replace(/\/+$/, '');
+    const cleanToken = (token || '').trim();
+
+    // Auto-upgrade insecure http to https for cloud/production domains
+    if (
+      cleanUrl.startsWith('http://') &&
+      !cleanUrl.includes('localhost') &&
+      !cleanUrl.includes('127.0.0.1') &&
+      !cleanUrl.includes('10.0.2.2') &&
+      !cleanUrl.includes('192.168.')
+    ) {
+      cleanUrl = cleanUrl.replace('http://', 'https://');
+    }
+
+    if (!cleanToken || !cleanUrl) {
       Alert.alert('Missing Data', 'Server URL and pairing token are required.');
+      setScanned(false);
       return;
     }
 
@@ -220,18 +267,18 @@ export default function PairingScreen() {
     await sessionHistoryService.recordEvent(
       'pairing_attempt',
       'Pairing attempt initiated',
-      'Exchanging credentials with relay server'
+      `Connecting to ${cleanUrl}`
     );
 
     try {
-      const result = await ApiClient.completePairing(serverUrl, token.trim(), 'Sender');
+      const result = await ApiClient.completePairing(cleanUrl, cleanToken, 'Sender');
 
       await StorageService.saveCredentials({
         role: 'sender',
         deviceId: result.senderDevice.id,
         deviceToken: result.senderDevice.token,
         pairedWithId: result.senderDevice.pairedWithReceiverId,
-        serverUrl: serverUrl.trim().replace(/\/+$/, '')
+        serverUrl: cleanUrl
       });
 
       await sessionHistoryService.recordEvent(
@@ -246,7 +293,11 @@ export default function PairingScreen() {
         [{ text: 'Open Sender Dashboard', onPress: () => router.replace('/sender') }]
       );
     } catch (err: any) {
-      Alert.alert('Pairing Failed', err.message || 'Invalid or expired token.');
+      const errorMsg = err.message || 'Invalid or expired token.';
+      Alert.alert(
+        'Pairing Failed',
+        `${errorMsg}\n\nTarget Server:\n${cleanUrl}\n\nPlease check that both devices are configured with the exact same Server URL.`
+      );
       setScanned(false);
     } finally {
       setCompleting(false);
@@ -255,21 +306,38 @@ export default function PairingScreen() {
 
   const onBarcodeScanned = ({ data }: { data: string }) => {
     if (scanned || completing) return;
+    const raw = (data || '').trim();
+    if (!raw) return;
+
     setScanned(true);
 
+    let targetServer = '';
+    let targetToken = '';
+
     try {
-      const parsed = JSON.parse(data);
+      const parsed = JSON.parse(raw);
       if (parsed.s && parsed.t) {
-        handleCompletePairing(parsed.s, parsed.t);
-        return;
+        targetServer = parsed.s;
+        targetToken = parsed.t;
+      } else if (parsed.t) {
+        targetToken = parsed.t;
       }
     } catch {
-      if (data.length >= 16) {
-        StorageService.getCredentials().then((creds) => {
-          handleCompletePairing(creds.serverUrl, data);
-        });
-        return;
+      // Not JSON: check if it's a raw token string (hex token is typically 64 chars)
+      if (raw.length >= 16) {
+        targetToken = raw;
       }
+    }
+
+    if (targetToken) {
+      if (targetServer) {
+        handleCompletePairing(targetServer, targetToken);
+      } else {
+        StorageService.getCredentials().then((creds) => {
+          handleCompletePairing(creds.serverUrl, targetToken);
+        });
+      }
+      return;
     }
 
     Alert.alert('Invalid QR Code', 'This code is not an OTP Bridge pairing token.');
@@ -334,7 +402,13 @@ export default function PairingScreen() {
             ) : pairingPayload && timeLeft > 0 ? (
               <View style={styles.qrContainer}>
                 <View style={styles.qrWrapper}>
-                  <QRCode value={pairingPayload} size={210} />
+                  <QRCode
+                    value={pairingPayload}
+                    size={230}
+                    quietZone={16}
+                    backgroundColor="#FFFFFF"
+                    color="#000000"
+                  />
                 </View>
                 <View style={styles.timerRow}>
                   <StatusBadge
@@ -342,6 +416,38 @@ export default function PairingScreen() {
                     variant={timeLeft > 60 ? 'info' : 'warning'}
                   />
                 </View>
+
+                {/* Manual Code Fallback Box */}
+                {pairingTokenOnly && (
+                  <View style={styles.codeSnippetBox}>
+                    <Text style={styles.codeSnippetTitle}>Or enter pairing code manually:</Text>
+                    <View style={styles.codeSnippetRow}>
+                      <Text style={styles.codeSnippetText} numberOfLines={1} ellipsizeMode="middle">
+                        {pairingTokenOnly}
+                      </Text>
+                      <TouchableOpacity
+                        style={styles.copyTokenBtn}
+                        onPress={async () => {
+                          await Clipboard.setStringAsync(pairingTokenOnly);
+                          setCopiedToken(true);
+                          setTimeout(() => setCopiedToken(false), 2000);
+                        }}
+                      >
+                        <Ionicons
+                          name={copiedToken ? 'checkmark-circle' : 'copy-outline'}
+                          size={15}
+                          color="#2563EB"
+                        />
+                        <Text style={styles.copyTokenBtnText}>
+                          {copiedToken ? 'Copied' : 'Copy'}
+                        </Text>
+                      </TouchableOpacity>
+                    </View>
+                    <Text style={styles.codeSnippetServer}>
+                      Server: {currentServerUrl}
+                    </Text>
+                  </View>
+                )}
               </View>
             ) : (
               <View style={styles.emptySession}>
@@ -414,11 +520,30 @@ export default function PairingScreen() {
               <View style={styles.cameraContainer}>
                 <CameraView
                   style={styles.camera}
-                  barcodeScannerSettings={{
-                    barcodeTypes: ['qr']
-                  }}
-                  onBarcodeScanned={scanned ? undefined : onBarcodeScanned}
+                  facing="back"
+                  enableTorch={torchEnabled}
+                  barcodeScannerSettings={qrBarcodeScannerSettings}
+                  onBarcodeScanned={scanned || completing ? undefined : onBarcodeScanned}
                 />
+
+                {/* Viewfinder Target Reticle */}
+                <View style={styles.viewfinderOverlay} pointerEvents="none">
+                  <View style={styles.viewfinderFrame} />
+                  <Text style={styles.viewfinderHint}>Align QR code within frame</Text>
+                </View>
+
+                {/* Torch Toggle Button */}
+                <TouchableOpacity
+                  style={styles.torchBtn}
+                  onPress={() => setTorchEnabled((prev) => !prev)}
+                >
+                  <Ionicons
+                    name={torchEnabled ? 'flash' : 'flash-off'}
+                    size={20}
+                    color="#FFFFFF"
+                  />
+                </TouchableOpacity>
+
                 {completing && (
                   <View style={styles.cameraOverlay}>
                     <ActivityIndicator size="large" color="#FFFFFF" />
@@ -458,13 +583,13 @@ export default function PairingScreen() {
         <Card style={{ padding: 16 }}>
           <Text style={styles.sectionHeader}>Manual Pairing Entry</Text>
           <Text style={styles.cardSubtitle}>
-            Fallback when camera is unavailable. Enter the relay URL and single-use token.
+            Fallback when camera has glare or screen reflection. Enter the relay URL and single-use token.
           </Text>
 
           <Text style={styles.inputLabel}>Relay Server URL</Text>
           <TextInput
             style={styles.input}
-            placeholder="http://192.168.1.X:4000"
+            placeholder="https://otp-bridge-server.onrender.com"
             placeholderTextColor="#94A3B8"
             value={manualServerUrl}
             onChangeText={setManualServerUrl}
@@ -472,7 +597,17 @@ export default function PairingScreen() {
             autoCorrect={false}
           />
 
-          <Text style={styles.inputLabel}>Pairing Token</Text>
+          <View style={styles.labelRow}>
+            <Text style={styles.inputLabel}>Pairing Token</Text>
+            <TouchableOpacity
+              onPress={async () => {
+                const text = await Clipboard.getStringAsync();
+                if (text) setManualToken(text.trim());
+              }}
+            >
+              <Text style={styles.pasteBtnText}>Paste from Clipboard</Text>
+            </TouchableOpacity>
+          </View>
           <TextInput
             style={styles.input}
             placeholder="Paste pairing token..."
@@ -712,5 +847,99 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '600',
     color: '#DC2626'
+  },
+  codeSnippetBox: {
+    marginTop: 14,
+    width: '100%',
+    backgroundColor: '#F8FAFC',
+    borderRadius: 12,
+    padding: 12,
+    borderWidth: 1,
+    borderColor: '#E2E8F0'
+  },
+  codeSnippetTitle: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#475569',
+    marginBottom: 6
+  },
+  codeSnippetRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+    paddingHorizontal: 8,
+    paddingVertical: 6
+  },
+  codeSnippetText: {
+    flex: 1,
+    fontSize: 12,
+    fontFamily: 'monospace',
+    color: '#0F172A',
+    marginRight: 6
+  },
+  copyTokenBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#EFF6FF',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 6
+  },
+  copyTokenBtnText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#2563EB',
+    marginLeft: 4
+  },
+  codeSnippetServer: {
+    fontSize: 11,
+    color: '#64748B',
+    marginTop: 6
+  },
+  viewfinderOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    justifyContent: 'center'
+  },
+  viewfinderFrame: {
+    width: 200,
+    height: 200,
+    borderRadius: 16,
+    borderWidth: 2,
+    borderColor: '#3B82F6',
+    backgroundColor: 'rgba(59, 130, 246, 0.05)'
+  },
+  viewfinderHint: {
+    color: '#FFFFFF',
+    fontSize: 12,
+    fontWeight: '600',
+    marginTop: 10,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    paddingHorizontal: 12,
+    paddingVertical: 4,
+    borderRadius: 8
+  },
+  torchBtn: {
+    position: 'absolute',
+    top: 12,
+    right: 12,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    borderRadius: 20,
+    padding: 8
+  },
+  labelRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginTop: 8,
+    marginBottom: 4
+  },
+  pasteBtnText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#2563EB'
   }
 });

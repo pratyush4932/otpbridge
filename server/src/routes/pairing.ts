@@ -6,7 +6,8 @@ import { wsManager } from '../websocket/ws-server.js';
 const pairingStartSchema = z.object({
   receiverName: z.string().max(64).optional(),
   deviceId: z.string().optional(),
-  token: z.string().optional()
+  token: z.string().optional(),
+  serverUrl: z.string().optional()
 });
 
 const pairingCompleteSchema = z.object({
@@ -52,9 +53,12 @@ export async function pairingRoutes(app: FastifyInstance) {
       rawReceiverToken = registered.rawToken;
     }
 
+    const clientServerUrl = parseResult.data.serverUrl?.trim().replace(/\/+$/, '');
     const hostHeader = req.headers.host || '127.0.0.1:4000';
-    const protocol = req.headers['x-forwarded-proto'] || (req.protocol === 'https' ? 'https' : 'http');
-    const serverUrl = `${protocol}://${hostHeader}`;
+    const rawProto = (req.headers['x-forwarded-proto'] as string | undefined)?.split(',')[0]?.trim();
+    const protocol = rawProto || (req.protocol === 'https' ? 'https' : 'http');
+    const detectedUrl = `${protocol}://${hostHeader}`;
+    const serverUrl = clientServerUrl || detectedUrl;
 
     try {
       const session = deviceStore.createPairingSession(receiverId, serverUrl);

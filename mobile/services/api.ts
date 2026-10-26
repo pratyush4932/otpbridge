@@ -61,8 +61,9 @@ const DEFAULT_HEADERS: Record<string, string> = {
 
 export const ApiClient = {
   async checkHealth(serverUrl: string): Promise<boolean> {
+    const cleanUrl = (serverUrl || '').trim().replace(/\/+$/, '');
     try {
-      const res = await fetch(`${serverUrl}/api/health`, {
+      const res = await fetch(`${cleanUrl}/api/health`, {
         method: 'GET',
         headers: {
           'Accept': 'application/json',
@@ -83,7 +84,8 @@ export const ApiClient = {
     existingDeviceId?: string,
     existingToken?: string
   ): Promise<StartPairingResult> {
-    const res = await fetch(`${serverUrl}/api/pairing/start`, {
+    const cleanUrl = (serverUrl || '').trim().replace(/\/+$/, '');
+    const res = await fetch(`${cleanUrl}/api/pairing/start`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -92,7 +94,8 @@ export const ApiClient = {
       body: JSON.stringify({
         receiverName,
         deviceId: existingDeviceId,
-        token: existingToken
+        token: existingToken,
+        serverUrl: cleanUrl
       })
     });
 
@@ -109,14 +112,16 @@ export const ApiClient = {
     pairingToken: string,
     senderName?: string
   ): Promise<CompletePairingResult> {
-    const res = await fetch(`${serverUrl}/api/pairing/complete`, {
+    const cleanUrl = (serverUrl || '').trim().replace(/\/+$/, '');
+    const cleanToken = (pairingToken || '').trim();
+    const res = await fetch(`${cleanUrl}/api/pairing/complete`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         ...DEFAULT_HEADERS
       },
       body: JSON.stringify({
-        pairingToken,
+        pairingToken: cleanToken,
         senderName
       })
     });
@@ -134,7 +139,8 @@ export const ApiClient = {
     deviceId: string,
     token: string
   ): Promise<DeviceStatusResult> {
-    const res = await fetch(`${serverUrl}/api/devices`, {
+    const cleanUrl = (serverUrl || '').trim().replace(/\/+$/, '');
+    const res = await fetch(`${cleanUrl}/api/devices`, {
       method: 'GET',
       headers: {
         'x-device-id': deviceId,
@@ -153,7 +159,8 @@ export const ApiClient = {
   },
 
   async revokeDevice(serverUrl: string, deviceId: string, token: string): Promise<boolean> {
-    const res = await fetch(`${serverUrl}/api/devices/revoke`, {
+    const cleanUrl = (serverUrl || '').trim().replace(/\/+$/, '');
+    const res = await fetch(`${cleanUrl}/api/devices/revoke`, {
       method: 'POST',
       headers: {
         'x-device-id': deviceId,
@@ -177,7 +184,8 @@ export const ApiClient = {
     token: string,
     payload: ForwardMessagePayload
   ): Promise<ForwardMessageResult> {
-    const res = await fetch(`${serverUrl}/api/messages`, {
+    const cleanUrl = (serverUrl || '').trim().replace(/\/+$/, '');
+    const res = await fetch(`${cleanUrl}/api/messages`, {
       method: 'POST',
       headers: {
         'x-device-id': deviceId,
@@ -200,8 +208,9 @@ export const ApiClient = {
     serverUrl: string,
     data: { packageName: string; title?: string; body?: string; reason?: string }
   ): Promise<void> {
+    const cleanUrl = (serverUrl || '').trim().replace(/\/+$/, '');
     try {
-      await fetch(`${serverUrl}/api/messages/unlisted`, {
+      await fetch(`${cleanUrl}/api/messages/unlisted`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

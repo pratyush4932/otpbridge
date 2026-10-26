@@ -11,6 +11,7 @@ import { wsManager } from './websocket/ws-server.js';
 
 export async function buildApp(): Promise<FastifyInstance> {
   const app = fastify({
+    trustProxy: true,
     bodyLimit: config.MAX_PAYLOAD_SIZE_BYTES,
     logger: {
       level: config.NODE_ENV === 'test' ? 'silent' : 'info',
