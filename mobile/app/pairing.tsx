@@ -7,7 +7,8 @@ import {
   TextInput,
   Alert,
   ActivityIndicator,
-  TouchableOpacity
+  TouchableOpacity,
+  Vibration
 } from 'react-native';
 import { useRouter, useLocalSearchParams, useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
@@ -58,7 +59,7 @@ export default function PairingScreen() {
   // Memoized barcode settings to avoid camera analyzer re-initialization on re-renders
   const qrBarcodeScannerSettings = useMemo(
     () => ({
-      barcodeTypes: ['qr' as const]
+      barcodeTypes: ['qr' as const, 'aztec' as const, 'datamatrix' as const]
     }),
     []
   );
@@ -244,7 +245,18 @@ export default function PairingScreen() {
 
   const handleCompletePairing = async (serverUrl: string, token: string) => {
     let cleanUrl = (serverUrl || '').trim().replace(/\/+$/, '');
-    const cleanToken = (token || '').trim();
+    let cleanToken = (token || '').trim();
+
+    // If the token is a JSON string (e.g. copied from QR payload)
+    if (cleanToken.startsWith('{') && cleanToken.endsWith('}')) {
+      try {
+        const parsed = JSON.parse(cleanToken);
+        if (parsed.t) cleanToken = String(parsed.t).trim();
+        if (parsed.s && !cleanUrl) cleanUrl = String(parsed.s).trim().replace(/\/+$/, '');
+      } catch {
+        // Continue with raw value
+      }
+    }
 
     // Auto-upgrade insecure http to https for cloud/production domains
     if (
@@ -304,10 +316,10 @@ export default function PairingScreen() {
     }
   };
 
-  const onBarcodeScanned = ({ data }: { data: string }) => {
+  const onBarcodeScanned = (event: { data?: string; raw?: string }) => {
     if (scanned || completing) return;
-    const raw = (data || '').trim();
-    if (!raw) return;
+    const rawData = (event.data || event.raw || '').trim();
+    if (!rawData || rawData === 'null') return;
 
     setScanned(true);
 
@@ -315,21 +327,38 @@ export default function PairingScreen() {
     let targetToken = '';
 
     try {
-      const parsed = JSON.parse(raw);
-      if (parsed.s && parsed.t) {
-        targetServer = parsed.s;
-        targetToken = parsed.t;
-      } else if (parsed.t) {
-        targetToken = parsed.t;
+      const parsed = JSON.parse(rawData);
+      if (parsed && typeof parsed === 'object') {
+        if (parsed.s && parsed.t) {
+          targetServer = String(parsed.s).trim();
+          targetToken = String(parsed.t).trim();
+        } else if (parsed.t) {
+          targetToken = String(parsed.t).trim();
+        }
       }
     } catch {
-      // Not JSON: check if it's a raw token string (hex token is typically 64 chars)
-      if (raw.length >= 16) {
-        targetToken = raw;
+      if (rawData.includes('token=')) {
+        try {
+          const urlObj = new URL(rawData);
+          const t = urlObj.searchParams.get('token');
+          const s = urlObj.searchParams.get('server');
+          if (t) targetToken = t.trim();
+          if (s) targetServer = s.trim();
+        } catch {
+          // Ignore URL parse error
+        }
+      }
+      if (!targetToken && rawData.length >= 16) {
+        targetToken = rawData;
       }
     }
 
     if (targetToken) {
+      try {
+        Vibration.vibrate(80);
+      } catch {
+        // Ignore vibration errors
+      }
       if (targetServer) {
         handleCompletePairing(targetServer, targetToken);
       } else {
@@ -521,6 +550,7 @@ export default function PairingScreen() {
                 <CameraView
                   style={styles.camera}
                   facing="back"
+                  barcodeScannerEnabled={true}
                   enableTorch={torchEnabled}
                   barcodeScannerSettings={qrBarcodeScannerSettings}
                   onBarcodeScanned={scanned || completing ? undefined : onBarcodeScanned}
@@ -771,13 +801,15 @@ const styles = StyleSheet.create({
     marginBottom: 14
   },
   cameraContainer: {
-    height: 270,
-    borderRadius: 14,
+    height: 350,
+    width: '100%',
+    borderRadius: 16,
     overflow: 'hidden',
     position: 'relative'
   },
   camera: {
-    flex: 1
+    width: '100%',
+    height: '100%'
   },
   cameraOverlay: {
     position: 'absolute',
@@ -902,24 +934,25 @@ const styles = StyleSheet.create({
   viewfinderOverlay: {
     ...StyleSheet.absoluteFillObject,
     alignItems: 'center',
-    justifyContent: 'center'
+    justifyContent: 'center',
+    backgroundColor: 'transparent'
   },
   viewfinderFrame: {
-    width: 200,
-    height: 200,
-    borderRadius: 16,
-    borderWidth: 2,
+    width: 230,
+    height: 230,
+    borderRadius: 20,
+    borderWidth: 2.5,
     borderColor: '#3B82F6',
-    backgroundColor: 'rgba(59, 130, 246, 0.05)'
+    backgroundColor: 'transparent'
   },
   viewfinderHint: {
     color: '#FFFFFF',
     fontSize: 12,
     fontWeight: '600',
-    marginTop: 10,
-    backgroundColor: 'rgba(0,0,0,0.6)',
-    paddingHorizontal: 12,
-    paddingVertical: 4,
+    marginTop: 14,
+    backgroundColor: 'rgba(0,0,0,0.65)',
+    paddingHorizontal: 14,
+    paddingVertical: 5,
     borderRadius: 8
   },
   torchBtn: {

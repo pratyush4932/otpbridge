@@ -90,9 +90,9 @@ export class ServiceMatcher {
   public static extractServiceNameFromContent(title?: string, text?: string): string {
     const cleanTitle = this.cleanSenderTitle(title);
 
-    // If clean title is a distinct name (not generic "Messages", "SMS", "Gmail", or bare number)
+    // If clean title is a distinct name (not generic "Messages", "SMS", "Gmail", "No-reply", or bare number)
     const isGenericTitle = !cleanTitle ||
-      /^(messages?|sms|chat|notification|verification|otp|new message|gmail|email|mail|\+?\d+)$/i.test(cleanTitle) ||
+      /^(messages?|sms|chat|notification|verification|otp|new message|gmail|email|mail|no[- ]?reply|alerts?|\+?\d+)$/i.test(cleanTitle) ||
       cleanTitle.includes('@');
 
     if (!isGenericTitle && cleanTitle.length >= 2) {
@@ -102,14 +102,16 @@ export class ServiceMatcher {
     // Try extracting service name from notification body text
     if (text) {
       const patterns = [
-        // "Your Amazon verification code is..."
-        /(?:your|the)\s+([A-Za-z0-9]{3,20})\s+(?:verification|security|login|otp|passcode|code)/i,
+        // "Your Amazon verification code is..." or "Your Amazon temporary sign-in code is..."
+        /(?:your|the)\s+([A-Za-z0-9]{3,20})\s+(?:verification|security|login|otp|passcode|code|(?:temporary\s+)?sign[- ]in\s+code)/i,
         // "OTP for Swiggy login is..."
         /(?:otp|code|verification|passcode)\s+(?:for|on)\s+([A-Za-z0-9]{3,20})/i,
         // "Swiggy OTP: 123456"
         /\b([A-Za-z0-9]{3,20})\s+(?:otp|verification|security\s+code)/i,
         // "use 123456 to verify your Uber account"
-        /(?:verify|access|login to)\s+(?:your\s+)?([A-Za-z0-9]{3,20})\s+(?:account|app)?/i
+        /(?:verify|access|login to)\s+(?:your\s+)?([A-Za-z0-9]{3,20})\s+(?:account|app)?/i,
+        // "Welcome to Uber! Your code is..."
+        /(?:welcome to|sign in to|login to)\s+([A-Za-z0-9]{3,20})/i
       ];
 
       for (const pattern of patterns) {
@@ -117,7 +119,7 @@ export class ServiceMatcher {
         if (match && match[1]) {
           const candidate = match[1].trim();
           // Skip common stop words
-          if (!/^(your|this|bank|code|phone|device|account|service|login|transaction)$/i.test(candidate)) {
+          if (!/^(your|this|bank|code|phone|device|account|service|login|transaction|verification|temporary|security|customer|notification|authentication)$/i.test(candidate)) {
             return candidate.charAt(0).toUpperCase() + candidate.slice(1);
           }
         }

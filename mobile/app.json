@@ -38,7 +38,8 @@
       [
         "expo-camera",
         {
-          "cameraPermission": "Allow OTP Bridge to access camera to scan pairing QR code."
+          "cameraPermission": "Allow OTP Bridge to access camera to scan pairing QR code.",
+          "barcodeScannerEnabled": true
         }
       ],
       "./plugins/withNotificationListener"
