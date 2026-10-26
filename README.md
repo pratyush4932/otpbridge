@@ -17,6 +17,12 @@
   <img src="https://img.shields.io/badge/License-MIT-blue?style=for-the-badge" alt="License" />
 </p>
 
+<p align="center">
+  <a href="https://render.com/deploy?repo=https://github.com/pratyush4932/otpbridge">
+    <img src="https://render.com/images/deploy-to-render-button.svg" alt="Deploy to Render" height="38" />
+  </a>
+</p>
+
 ---
 
 ## 🌟 Overview
@@ -241,7 +247,21 @@ adb -s <DEVICE_ID> install -r -g app/build/outputs/apk/debug/app-debug.apk
 
 You can host the relay server completely free on [Render](https://render.com) with automatic HTTPS/TLS and WebSocket support:
 
-### Option A: Using the Included Blueprint (`render.yaml`)
+### 🚀 1-Click Instant Deploy
+
+Click the button below to deploy the backend server instantly:
+
+<p align="center">
+  <a href="https://render.com/deploy?repo=https://github.com/pratyush4932/otpbridge">
+    <img src="https://render.com/images/deploy-to-render-button.svg" alt="Deploy to Render" />
+  </a>
+</p>
+
+Render automatically detects [`render.yaml`](./render.yaml), configures the Node.js runtime, builds the TypeScript code, and establishes your live `https://` REST API and `wss://` WebSocket relay.
+
+---
+
+### Option A: Using Render Blueprints
 1. Push this repository to GitHub or GitLab.
 2. In the Render Dashboard, click **New +** → **Blueprint**.
 3. Select this repository. Render automatically reads `render.yaml` and provisions the Web Service!
