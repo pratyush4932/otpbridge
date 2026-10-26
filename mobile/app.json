@@ -4,17 +4,17 @@
     "slug": "otp-bridge",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/otpbridge2.png",
+    "icon": "./assets/otpb_icon.png",
     "scheme": "mobile",
     "userInterfaceStyle": "automatic",
     "ios": {
-      "icon": "./assets/otpbridge2.png"
+      "icon": "./assets/otpb_icon.png"
     },
     "android": {
       "package": "com.otpbridge.app",
       "adaptiveIcon": {
-        "backgroundColor": "#000000",
-        "foregroundImage": "./assets/otpbridge2.png",
+        "backgroundColor": "#0254E3",
+        "foregroundImage": "./assets/otpb_icon.png",
         "backgroundImage": "./assets/images/android-icon-background.png",
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
@@ -22,7 +22,7 @@
     },
     "web": {
       "output": "server",
-      "favicon": "./assets/otpbridge2.png"
+      "favicon": "./assets/otpb_icon.png"
     },
     "plugins": [
       "expo-router",
@@ -30,7 +30,7 @@
         "expo-splash-screen",
         {
           "backgroundColor": "#FFFFFF",
-          "image": "./assets/otpbridge.png",
+          "image": "./assets/otp_logo.png",
           "imageWidth": 160
         }
       ],

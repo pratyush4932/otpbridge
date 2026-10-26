@@ -11,7 +11,7 @@ function HeaderTitleWithLogo() {
   return (
     <View style={headerStyles.container}>
       <Image
-        source={require('../assets/otpbridge.png')}
+        source={require('../assets/otp_logo.png')}
         style={headerStyles.logo}
         resizeMode="contain"
       />
@@ -100,9 +100,10 @@ const headerStyles = StyleSheet.create({
     alignItems: 'center'
   },
   logo: {
-    width: 26,
-    height: 26,
-    marginRight: 8
+    width: 28,
+    height: 28,
+    marginRight: 10,
+    borderRadius: 7
   },
   title: {
     fontWeight: '700',

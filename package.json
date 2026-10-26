@@ -8,6 +8,8 @@
     "server"
   ],
   "scripts": {
+    "start": "npm --prefix server start",
+    "build": "npm --prefix server run build",
     "dev:server": "npm --prefix server run dev",
     "dev:mobile": "npm --prefix mobile run start",
     "test:server": "npm --prefix server run test",

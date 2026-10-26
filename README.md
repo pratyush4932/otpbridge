@@ -190,6 +190,18 @@ otp.yourdomain.com {
 }
 ```
 
+### Option D: Deploy to Render (Cloud Hosting with Free HTTPS/WSS)
+1. Push your repository to GitHub or GitLab.
+2. Sign in to [Render](https://render.com) and click **New +** → **Web Service** (or use **Blueprint** with the included `render.yaml`).
+3. Set configuration:
+   - **Root Directory**: `server`
+   - **Runtime**: `Node`
+   - **Build Command**: `npm install --include=dev && npm run build`
+   - **Start Command**: `npm start`
+   - **Health Check Path**: `/api/health`
+4. Render automatically assigns a public HTTPS URL (e.g., `https://otp-bridge-server.onrender.com`) and supports WebSocket (`wss://`) connections out of the box with zero open ports on your local router.
+
+
 ---
 
 ## 6. Building the Custom Android Mobile App
