@@ -1,307 +1,294 @@
-# OTP Bridge — Private Android Notification Forwarding App
+<p align="center">
+  <img src="./mobile/assets/otp_logo.png" width="128" height="128" alt="OTP Bridge Logo" style="border-radius: 28px; box-shadow: 0 8px 24px rgba(2, 84, 227, 0.25);" />
+</p>
 
-A secure, private notification forwarding bridge built specifically for two user-owned Android 14+ phones (**Phone A: Sender** and **Phone B: Receiver**), backed by a lightweight Node.js/Fastify relay server.
+<h1 align="center">OTP Bridge</h1>
+
+<p align="center">
+  <strong>Private, High-Speed Notification & OTP Forwarding Between Android Devices</strong><br>
+  <em>Zero SMS permissions required • End-to-end encrypted relay • Real-time WebSocket delivery</em>
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/Platform-Android%2014%2B-3DDC84?style=for-the-badge&logo=android&logoColor=white" alt="Android 14+" />
+  <img src="https://img.shields.io/badge/Stack-React%20Native%20%7C%20Expo-000020?style=for-the-badge&logo=expo&logoColor=white" alt="React Native & Expo" />
+  <img src="https://img.shields.io/badge/Backend-Fastify%20%2B%20WebSockets-000000?style=for-the-badge&logo=fastify&logoColor=white" alt="Fastify WebSocket Relay" />
+  <img src="https://img.shields.io/badge/Tests-60%2F60%20Passing-success?style=for-the-badge&logo=vitest&logoColor=white" alt="Tests Passing" />
+  <img src="https://img.shields.io/badge/License-MIT-blue?style=for-the-badge" alt="License" />
+</p>
 
 ---
 
-## 1. System Architecture
+## 🌟 Overview
+
+**OTP Bridge** is a purpose-built utility designed to automatically, securely, and instantly forward verification codes and OTP notifications between two user-owned Android devices:
+
+* 📱 **Phone A (Sender)**: Monitors incoming SMS / carrier notifications using Android's native `NotificationListenerService` without requesting dangerous `READ_SMS` permissions. Extracts the OTP code and target service name and dispatches it over TLS.
+* 🚀 **Relay Server**: Ephemeral, zero-logging Fastify bridge that holds messages strictly in RAM (max 5-minute TTL) and pushes them via real-time WebSockets.
+* 📲 **Phone B (Receiver)**: Listens via authenticated WebSocket, displays modern visual cards with carrier tags, and provides **1-Tap Quick Copy** to clipboard with haptic feedback.
+
+---
+
+## 📐 System Architecture
+
+### 🔄 End-to-End Component Flow
 
 ```mermaid
 flowchart LR
-    subgraph PhoneA [Phone A — Sender]
-        NLS[Android NotificationListenerService] --> Filter[Explicit Package Allowlist]
-        Filter --> OTP[Conservative OTP Detector]
-        OTP --> Dedup[Deduplicator Cache]
-        Dedup --> ClientA[API Client & Sender Keystore]
+    %% Subgraphs
+    subgraph SenderArea ["📱 Phone A (Sender Device)"]
+        direction TB
+        NLS["🔔 Android Notification Listener"]
+        Filter["🛡️ Explicit App Allowlist"]
+        Engine["🔍 Smart Carrier & OTP Matcher"]
+        Cache["⚡ Deduplication Cache"]
+        Client["📤 Secure TLS Dispatcher"]
+        
+        NLS --> Filter --> Engine --> Cache --> Client
     end
 
-    subgraph Server [Backend Relay Server]
-        Auth[Fastify & Device Auth]
-        Queue[Ephemeral TTL Message Queue]
-        WS[WebSocket Manager]
-        Auth --> WS
+    subgraph ServerArea ["☁️ Fastify Relay Hub"]
+        direction TB
+        Auth["🔑 Cryptographic Token Auth"]
+        Queue["⏱️ Ephemeral TTL RAM Queue"]
+        WSHub["📡 Real-Time WebSocket Hub"]
+        
         Auth --> Queue
+        Auth --> WSHub
+        Queue -. "Flush on Reconnect" .-> WSHub
     end
 
-    subgraph PhoneB [Phone B — Receiver]
-        WSClient[Authenticated WebSocket Client]
-        UI[Receiver Dashboard]
-        Copy[1-Tap Copy to Clipboard]
-        WSClient --> UI
-        UI --> Copy
+    subgraph ReceiverArea ["📲 Phone B (Receiver Device)"]
+        direction TB
+        WSClient["⚡ Persistent WebSocket Client"]
+        Dashboard["📊 Live OTP Dashboard"]
+        CopyBtn["📋 1-Tap Copy with Haptics"]
+        
+        WSClient --> Dashboard --> CopyBtn
     end
 
-    ClientA -- "POST /api/messages (TLS)" --> Auth
-    Queue -. "Flush on Reconnect" .-> WS
-    WS -- "Real-Time Push (WSS)" --> WSClient
+    Client -- "POST /api/messages (TLS)" --> Auth
+    WSHub -- "WSS Instant Push" --> WSClient
+
+    %% Custom Styles
+    classDef senderStyle fill:#EFF6FF,stroke:#3B82F6,stroke-width:2px,color:#1E3A8A;
+    classDef serverStyle fill:#F0FDF4,stroke:#22C55E,stroke-width:2px,color:#14532D;
+    classDef receiverStyle fill:#FAF5FF,stroke:#A855F7,stroke-width:2px,color:#581C87;
+    
+    class NLS,Filter,Engine,Cache,Client senderStyle;
+    class Auth,Queue,WSHub serverStyle;
+    class WSClient,Dashboard,CopyBtn receiverStyle;
 ```
 
 ---
 
-## 2. Monorepo Structure
+### ⚡ Real-Time Lifecycle Sequence
 
-```
-otp-bridge/
-├── mobile/
-│   ├── android/                          # Native Android prebuilt project
-│   ├── app/                              # Expo Router Screens
-│   │   ├── _layout.tsx                   # Material Stack Navigation & Theme
-│   │   ├── index.tsx                     # Home Dashboard & Role Picker
-│   │   ├── sender.tsx                    # Phone A: Sender Controls & Activity Log
-│   │   ├── receiver.tsx                  # Phone B: Real-Time OTP List & 1-Tap Copy
-│   │   ├── select-apps.tsx               # Explicit App Allowlist Selector
-│   │   ├── pairing.tsx                   # QR Code Generator & Camera Scanner
-│   │   └── settings.tsx                  # Server URL & Device Keystore Revocation
-│   ├── components/                       # Material-styled Reusable Components
-│   │   ├── Card.tsx
-│   │   ├── StatusBadge.tsx
-│   │   ├── PrimaryButton.tsx
-│   │   └── EmptyState.tsx
-│   ├── modules/
-│   │   └── notification-listener/        # Custom Native Android Module
-│   │       ├── android/src/main/java/expo/modules/notificationlistener/
-│   │       │   ├── NotificationListenerModule.kt
-│   │       │   ├── BridgeNotificationListenerService.kt
-│   │       │   └── NotificationEventBus.kt
-│   │       ├── expo-module.config.json
-│   │       ├── package.json
-│   │       └── index.ts
-│   ├── plugins/
-│   │   └── withNotificationListener.js   # Expo Config Plugin for AndroidManifest
-│   ├── services/
-│   │   ├── api.ts                        # HTTP API Client
-│   │   ├── deduplicator.ts               # Stable Notification Deduplication
-│   │   ├── notification-pipeline.ts      # Core Filter, OTP & Forwarding Pipeline
-│   │   ├── otp-detector.ts               # Conservative OTP Extraction Engine
-│   │   ├── receiver-socket.ts            # Resilient WebSocket Client
-│   │   └── storage.ts                    # Keystore Secure Storage
-│   ├── tests/                            # Unit & Integration Tests (23 Passing)
-│   ├── app.json
-│   └── package.json
-├── server/
-│   ├── src/
-│   │   ├── index.ts                      # Fastify Server & WebSocket Hub
-│   │   ├── config.ts                     # Zod Environment Validation
-│   │   ├── routes/
-│   │   │   ├── health.ts                 # Health Check Endpoint
-│   │   │   ├── pairing.ts                # Single-Use QR Pairing Lifecycle
-│   │   │   ├── devices.ts                # Device Query & Revocation
-│   │   │   └── messages.ts               # Message Forwarding with Ephemeral Queue
-│   │   ├── security/
-│   │   │   ├── sanitize.ts               # Zero-OTP Log Sanitizer
-│   │   │   └── token.ts                  # Cryptographic Token Generator (SHA-256)
-│   │   ├── services/
-│   │   │   ├── device-store.ts           # Device Pairing & Revocation Store
-│   │   │   └── message-queue.ts          # Ephemeral In-Memory Queue with Strict TTL
-│   │   └── websocket/
-│   │       └── ws-server.ts              # Receiver WebSocket Hub & Heartbeats
-│   ├── tests/                            # Server Integration Tests (9 Passing)
-│   ├── package.json
-│   ├── tsconfig.json
-│   └── .env.example
-├── .gitignore
-├── package.json                          # Root monorepo workspace scripts
-└── README.md
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Bank as 🏦 Bank / Carrier
+    participant Sender as 📱 Sender (Phone A)
+    participant Relay as ☁️ Fastify Relay Hub
+    participant Receiver as 📲 Receiver (Phone B)
+
+    Note over Sender,Receiver: 🔗 Paired via Single-Use 256-Bit Cryptographic QR Code
+    Bank->>Sender: Incoming SMS: "Your OTP is 482019 for Swiggy"
+    activate Sender
+    Sender->>Sender: Native Notification Listener intercepts event
+    Sender->>Sender: Verify allowlist (Google Messages / Carrier)
+    Sender->>Sender: Extract OTP (482019) & Service (Swiggy)
+    Sender->>Relay: POST /api/messages with Device-Token
+    deactivate Sender
+    activate Relay
+    alt Receiver is Connected via WebSocket
+        Relay-->>Receiver: PUSH { id, service: "Swiggy", code: "482019" }
+    else Receiver is Temporarily Offline
+        Relay->>Relay: Hold in Ephemeral RAM Queue (TTL: 300s)
+        Receiver->>Relay: Reconnect WebSocket
+        Relay-->>Receiver: Flush Queued Messages
+    end
+    deactivate Relay
+    activate Receiver
+    Receiver->>Receiver: Trigger sound & haptic notification
+    Receiver->>Receiver: User taps "Copy Code" -> Clipboard Ready
+    deactivate Receiver
 ```
 
 ---
 
-## 3. Technology Stack & Prerequisites
+## ✨ Key Features & Highlights
 
-### Prerequisites
-- **Node.js**: v20.0.0 or newer (tested with v22.14.0)
-- **npm**: v10.0.0 or newer
-- **Java**: OpenJDK 17 or newer (tested with OpenJDK 25)
-- **Android SDK**: Build Tools 34.0.0+, Android 14+ SDK (API 34/35)
-- **Hardware**: Two Android devices running Android 14 or newer.
+| Feature | Description | Icon |
+| :--- | :--- | :---: |
+| **No SMS Permissions** | Uses Android's official `NotificationListenerService` API. Never asks for `READ_SMS` or `RECEIVE_SMS`. | 🛡️ |
+| **Smart Carrier Matching** | Distinguishes Indian TRAI SMS headers (e.g. `AX-SWIGGY`, `VK-AMZN`) and labels service origins automatically. | 🎯 |
+| **Universal Carrier Support** | Supports Google Messages, Samsung Messages, Truecaller, and optionally Gmail alerts. | 📬 |
+| **Zero Plain-Text Logs** | Passwords and OTP codes are redacted from server terminal logs. Only anonymized message IDs are recorded. | 🔒 |
+| **Ephemeral RAM Queue** | Codes are never written to disk or database. Messages expire and purge automatically after 5 minutes. | ⏱️ |
+| **Instant QR Pairing** | Cryptographic 256-bit token exchange via one-time QR code camera scan. | 📷 |
+| **1-Tap Quick Copy** | Fast, intuitive button on Phone B's dashboard that copies the verification code directly to your clipboard. | 📋 |
+| **Auto Reconnection** | Resilient exponential backoff keeps WebSocket connected across Wi-Fi and mobile data handovers. | 🔄 |
 
 ---
 
-## 4. Quick Start & Setup Commands
+## 📦 Monorepo Structure
 
-### 1. Install Dependencies
-From the repository root:
 ```bash
-# Install server and mobile dependencies
+otp_bridge/
+├── mobile/                               # 📱 React Native & Android Client
+│   ├── android/                          # Native Gradle Android project
+│   │   └── app/build/outputs/apk/        # 📍 Compiled APK files (Debug & Release)
+│   ├── app/                              # Expo Router Screens & Navigation
+│   │   ├── _layout.tsx                   # Unified Header with Rounded Logo
+│   │   ├── index.tsx                     # Mode Selector (Sender / Receiver)
+│   │   ├── sender.tsx                    # Phone A: Live Activity & Carrier Controls
+│   │   ├── receiver.tsx                  # Phone B: Real-Time OTP Stream & 1-Tap Copy
+│   │   ├── select-apps.tsx               # Target Apps Allowlist & Filters
+│   │   ├── pairing.tsx                   # QR Code Generation & Camera Scanner
+│   │   └── settings.tsx                  # Server URL & Device Keystore Revocation
+│   ├── assets/                           # Branding assets (otp_logo.png, otpb_icon.png)
+│   ├── modules/notification-listener/    # Kotlin Native Android Module
+│   └── services/                         # Pipeline, Storage, Carrier & Socket Engine
+├── server/                               # ☁️ Fastify Backend Relay
+│   ├── src/                              # TypeScript Server Code
+│   │   ├── index.ts                      # App bootstrap & WebSocket setup
+│   │   ├── config.ts                     # Zod-validated environment config
+│   │   ├── routes/                       # REST endpoints (health, pairing, messages)
+│   │   └── websocket/                    # Resilient WebSocket connection hub
+│   └── tests/                            # Server integration test suite
+├── render.yaml                           # 🚀 Render 1-click cloud deployment blueprint
+├── RELEASE.md                            # 📖 Comprehensive Android Release & APK Guide
+└── package.json                          # Workspace root commands
+```
+
+---
+
+## 🚀 Where to Find the APK
+
+After building, your generated APK binaries are located here:
+
+### 📍 Debug APK (Ready for Testing & Sideloading)
+```
+mobile/android/app/build/outputs/apk/debug/app-debug.apk
+```
+*Pre-signed with Android's development key. You can install it immediately on any device.*
+
+### 📍 Release APK (Production Distribution)
+```
+mobile/android/app/build/outputs/apk/release/app-release.apk
+```
+*(If a custom keystore is not yet configured in `gradle.properties`, the unsigned build will be at `app-release-unsigned.apk`).*
+
+---
+
+## 🛠️ Quick Start & Build Instructions
+
+### 1️⃣ Install Dependencies
+
+From the workspace root directory:
+```bash
+# Install root, server, and mobile packages
+npm install
 npm --prefix server install
 npm --prefix mobile install
 ```
 
-### 2. Configure Environment
-In the `server/` directory, create a `.env` file based on `.env.example`:
+### 2️⃣ Run Automated Tests
+
+Execute the full suite of **60 unit & integration tests**:
 ```bash
-cp server/.env.example server/.env
+npm test
 ```
 
-Default configuration:
-```env
-PORT=4000
-HOST=0.0.0.0
-NODE_ENV=development
-MAX_PAYLOAD_SIZE_BYTES=16384
-RATE_LIMIT_MAX=60
-RATE_LIMIT_TIME_WINDOW_MS=60000
-PAIRING_TOKEN_TTL_SECONDS=300
-MESSAGE_QUEUE_TTL_SECONDS=300
-MAX_QUEUED_MESSAGES_PER_RECEIVER=20
-```
+---
 
-### 3. Run Automated Tests
-Verify all 32 integration & unit tests pass:
+### 3️⃣ Start the Relay Server Locally
+
 ```bash
-# Run all tests (Server: 9 tests, Mobile: 23 tests)
-npm run test
+# From workspace root
+npm start
 
-# Or run separately:
-npm run test:server
-npm run test:mobile
-```
-
-### 4. Start the Backend Relay Server Locally
-```bash
-# From workspace root:
+# Or in development watch mode
 npm run dev:server
 ```
-The server will start at:
-- HTTP API: `http://0.0.0.0:4000`
-- WebSocket: `ws://0.0.0.0:4000/ws`
+The server will start listening at:
+- **HTTP REST API**: `http://localhost:4000`
+- **WebSocket Endpoint**: `ws://localhost:4000/ws`
+- **Health Check**: `http://localhost:4000/api/health`
 
 ---
 
-## 5. Exposing Server to the Internet (HTTPS/WSS)
+### 4️⃣ Build & Install Mobile App on Android
 
-Because Phone A and Phone B need to communicate over cellular data or different Wi-Fi networks, you should expose the relay server securely:
+Connect your Android phone via USB with **USB Debugging** enabled:
 
-### Option A: Tailscale (Recommended for Personal Use)
-1. Install Tailscale on your server machine and on both Android phones.
-2. The server receives a MagicDNS name or static 100.x.y.z IP.
-3. Access via `http://<server-tailscale-ip>:4000` securely without port forwarding.
-
-### Option B: Cloudflare Tunnel (Zero Open Ports)
 ```bash
-cloudflared tunnel --url http://localhost:4000
-```
-Provides an automatic public `https://otp-relay.yourdomain.com` and `wss://otp-relay.yourdomain.com`.
+# Check device connection
+adb devices
 
-### Option C: Reverse Proxy (Caddy or Nginx with TLS)
-```caddy
-otp.yourdomain.com {
-    reverse_proxy localhost:4000
-}
-```
-
-### Option D: Deploy to Render (Cloud Hosting with Free HTTPS/WSS)
-1. Push your repository to GitHub or GitLab.
-2. Sign in to [Render](https://render.com) and click **New +** → **Web Service** (or use **Blueprint** with the included `render.yaml`).
-3. Set configuration:
-   - **Root Directory**: `server`
-   - **Runtime**: `Node`
-   - **Build Command**: `npm install --include=dev && npm run build`
-   - **Start Command**: `npm start`
-   - **Health Check Path**: `/api/health`
-4. Render automatically assigns a public HTTPS URL (e.g., `https://otp-bridge-server.onrender.com`) and supports WebSocket (`wss://`) connections out of the box with zero open ports on your local router.
-
-
----
-
-## 6. Building the Custom Android Mobile App
-
-Since this app uses custom native Android Kotlin code (`NotificationListenerService`), it cannot run inside standard Expo Go. You must build a custom standalone APK or custom dev build.
-
-### Option 1: Run Local Custom Android Build
-Connect your Android phone via USB with USB Debugging enabled:
-```bash
-cd mobile
-npx expo run:android
-```
-
-### Option 2: Build Standalone Signed Release APKs
-```bash
+# Build and assemble debug APK
 cd mobile/android
-# On Windows PowerShell:
-.\gradlew assembleRelease
+.\gradlew assembleDebug
 
-# On Linux/macOS:
-./gradlew assembleRelease
-```
-The generated APK will be at:
-`mobile/android/app/build/outputs/apk/release/app-release.apk`
-
-Install on both phones via ADB:
-```bash
-adb -s <PHONE_A_SERIAL> install -r app-release.apk
-adb -s <PHONE_B_SERIAL> install -r app-release.apk
+# Install directly to phone with permissions pre-granted
+adb -s <DEVICE_ID> install -r -g app/build/outputs/apk/debug/app-debug.apk
 ```
 
 ---
 
-## 7. Step-by-Step Installation & Pairing Guide
+## ☁️ Deploying the Server to Render
+
+You can host the relay server completely free on [Render](https://render.com) with automatic HTTPS/TLS and WebSocket support:
+
+### Option A: Using the Included Blueprint (`render.yaml`)
+1. Push this repository to GitHub or GitLab.
+2. In the Render Dashboard, click **New +** → **Blueprint**.
+3. Select this repository. Render automatically reads `render.yaml` and provisions the Web Service!
+
+### Option B: Manual Web Service Setup
+1. In Render Dashboard, click **New +** → **Web Service**.
+2. Connect your repository and configure:
+   * **Root Directory**: `server`
+   * **Runtime**: `Node`
+   * **Build Command**: `npm install --include=dev && npm run build`
+   * **Start Command**: `npm start`
+   * **Health Check Path**: `/api/health`
+3. Click **Deploy**. Render will generate a public URL like:
+   ```
+   https://otp-bridge-server.onrender.com
+   ```
+
+---
+
+## 📱 Device Setup & Pairing Walkthrough
 
 ### Step 1: Set Server URL
-1. Open the app on both phones.
-2. Tap **Network & Security Settings**.
-3. Set your server URL (e.g. `https://otp.yourdomain.com` or `http://192.168.1.100:4000`).
-4. Tap **Test Connection** to confirm connectivity.
+1. Open **OTP Bridge** on both devices.
+2. Go to **Settings** (gear icon) and set your Server URL (e.g., `https://otp-bridge-server.onrender.com`).
 
-### Step 2: Configure Phone B (Receiver)
-1. On Phone B, tap **Pair New Devices (QR)**.
-2. Select the **Display QR (Receiver)** tab.
-3. Tap **Create New Pairing Session**. A QR code appears with a 5-minute countdown timer.
+### Step 2: Display QR on Receiver (Phone B)
+1. On **Phone B**, select **Receiver Mode**.
+2. Tap **Pair New Device**.
+3. A cryptographic QR code with a 5-minute validity countdown will appear.
 
-### Step 3: Configure Phone A (Sender)
-1. On Phone A, tap **Phone A (Sender Mode)**.
-2. Android will alert that notification access is required. Tap **Grant Notification Access**.
-3. Android's **Special App Access -> Notification Access** screen opens. Toggle **OTP Bridge** to **Allowed**.
-4. Return to the app. The permission status will immediately update to **ACTIVE**.
-5. Tap **Manage Device Pairing** -> **Scan QR (Sender)**.
-6. Grant camera permission and point camera at Phone B's screen.
-7. Phone A and Phone B automatically exchange high-entropy credentials. Phone A is bound to Phone B.
-
-### Step 4: Configure Universal Carriers & Target Apps on Phone A
-1. On Phone A, tap **Configure Carriers & Applications**.
-2. **Universal Message Apps (Carriers)**: Toggle your OTP-receiving messaging apps (e.g. `Google Messages`, `Samsung Messages`, `WhatsApp`, `Telegram`).
-3. **Forward All vs Target Filtering**:
-   - Toggle **Forward all OTPs from carriers** to forward every genuine OTP received via SMS or WhatsApp.
-   - OR uncheck it and select specific **Target Services** (e.g. `Swiggy`, `Uber`, `Amazon`, `Bank`) to only forward OTPs matching those selected applications.
-4. Tap **Save Settings**.
-> **Smart Matcher Rule**: When OTPs arrive via SMS or WhatsApp, OTP Bridge matches the SMS header (e.g., `AX-SWIGGY`) or message content to your target services, labeling the OTP on Phone B as `Swiggy • via SMS` or `Uber • via WhatsApp`.
-
-### Step 5: Test with Synthetic Notification
-1. On Phone A, in the **Sender Dashboard**, tap **Simulate Incoming OTP Notification**.
-2. A synthetic notification with a random 6-digit code will enter the native pipeline.
-3. Switch to Phone B: the code will appear instantly with a **Copy Code** button!
-4. Tap **Copy Code** to copy the code to your clipboard.
+### Step 3: Grant Permissions & Scan on Sender (Phone A)
+1. On **Phone A**, select **Sender Mode**.
+2. Tap **Grant Notification Access** → Android Settings will open → Toggle **OTP Bridge** to **Allowed**.
+3. *(Recommended)* Set Battery usage to **Unrestricted** to prevent the OS from killing the background listener.
+4. Tap **Scan Pairing QR Code** and scan Phone B's screen. Both devices are now securely linked!
 
 ---
 
-## 8. Android 14+ Manual Testing Checklist
+## 🔒 Security & Privacy Architecture
 
-| Test Scenario | Steps to Execute | Expected Behavior |
-| :--- | :--- | :--- |
-| **Notification Permission Grant** | Open app, tap "Grant Notification Access", toggle on in Android Settings. | Status switches from "Required" to "ACTIVE" immediately upon app resume. |
-| **Notification Permission Revocation** | Go to Android Settings -> Revoke Notification Access for OTP Bridge. | App immediately detects revocation, displays warning banner, and disables processing. |
-| **Allowlist Enforcement** | Allow `com.google.android.apps.messaging`. Trigger notification from an unlisted app. | Activity log records `IGNORED_UNLISTED`. Payload is never sent to server. |
-| **Screen Off / App Backgrounded** | Lock Phone A screen. Post a synthetic or real notification. | Notification listener service receives event and successfully forwards message. |
-| **Battery Optimization** | Enable standard battery saver vs unrestricted battery mode. | For guaranteed 24/7 background delivery, app prompts user to set Battery usage to "Unrestricted". |
-| **Phone Reboot** | Reboot Phone A. | Android automatically re-binds `NotificationListenerService` upon boot without user intervention. |
-| **Network Interruption** | Put Phone A in Airplane mode, trigger notification, then restore Wi-Fi. | Error logged safely; pipeline resumes forwarding as soon as connectivity returns. |
-| **Receiver Offline (TTL Queue)** | Disconnect Phone B Wi-Fi. Trigger notification on Phone A. | Server returns `receiverOffline: true`, stores message in memory TTL queue. Reconnect Phone B: queued OTP is flushed and delivered immediately. |
-| **Source App Redacted Content** | App receives notification with hidden/empty text ("New message on lockscreen"). | Pipeline ignores notification as required by spec; no false forward occurs. |
-| **False Positive Rejection** | Receive message: "Happy New Year 2026!" or "Order #987654 shipped". | OTP detector rejects numbers lacking verification context. |
+* **Zero SMS Permissions**: Protects sensitive financial inbox messages by only reading notifications via official Android APIs.
+* **Granular Allowlisting**: Only notifications from specified carriers and target applications are ever processed; all other notifications are discarded before extraction.
+* **In-Memory Volatility**: OTPs exist in server RAM only and are wiped upon receipt or TTL expiry (300 seconds). No database persistence.
+* **Instant Device Revocation**: Either party can tap **Unlink** in Settings to instantly invalidate pairing tokens on both client and server.
 
 ---
 
-## 9. Security, Privacy & Threat Model
-
-1. **No SMS Permissions Required**:
-   The app uses Android's official `NotificationListenerService` API. It does **not** request `READ_SMS` or `RECEIVE_SMS`, preventing broad inbox access.
-2. **Explicit Allowlist Only**:
-   The native pipeline enforces package allowlisting before running OTP detection or network dispatch.
-3. **Zero Plain-Text OTP Logging**:
-   The Fastify server and React Native client use redaction helpers. Server logs record only `[MSG_EVENT] id=... sender=... status=...`, completely omitting verification codes.
-4. **Single-Use Replay Protection**:
-   Pairing tokens are 256-bit cryptographic secrets that are invalidated immediately upon first use or within 5 minutes.
-5. **Ephemeral Storage**:
-   OTP notifications are held in ephemeral RAM while active and discarded immediately after delivery or upon the 5-minute TTL expiration. They are never written to a database or disk.
-6. **Instant Revocation**:
-   Tapping **Unlink** or **Revoke** on either device immediately breaks the device binding on the server and wipes credentials from Android Keystore.
+<p align="center">
+  <sub>Built with ❤️ for private, reliable, and secure Android notification forwarding.</sub>
+</p>
